@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 import requests
 import re
 import logging
@@ -69,7 +69,7 @@ def fetch_alpha_vantage_data(endpoint, params):
         logger.info(f"Response headers: {response.headers}")
         if endpoint == "EARNINGS_CALENDAR":
             # Handle CSV response
-            logger.info(f"Raw CSV response: {response.text!r}")
+            logger.info(f"Raw CSV response: {response.text[:1000]!r}...")
             return response.text
         data = response.json()
         logger.info(f"Raw JSON response: {data}")
@@ -92,7 +92,7 @@ def fetch_alpha_vantage_earnings(ticker):
             "horizon": horizon
         }
         csv_data = fetch_alpha_vantage_data("EARNINGS_CALENDAR", params)
-        logger.info(f"Step 1: Fetched per-symbol CSV data for {ticker} with horizon {horizon}: {csv_data!r}")
+        logger.info(f"Step 1: Fetched per-symbol CSV data for {ticker} with horizon {horizon}: {csv_data[:1000] if csv_data else None!r}...")
 
         if csv_data:
             # Step 2: Parse the per-symbol CSV
@@ -271,6 +271,7 @@ def get_historical_data(ticker):
                 prices.append(price)
         logger.info(f"Intraday timestamps for {ticker}: {dates[:5]}")
         return {"dates": dates, "prices": prices}
+    logger.warning(f"No intraday data found for {ticker}")
     return {"dates": [], "prices": []}
 
 def get_earnings_date(ticker):
@@ -287,25 +288,27 @@ def get_company_overview(ticker):
             "market_cap": parse_float(data.get("MarketCapitalization", "N/A")),
             "shares": parse_float(data.get("SharesOutstanding", "N/A"))
         }
+    logger.warning(f"No company overview data found for {ticker}")
     return {"market_cap": "N/A", "shares": "N/A"}
 
 def get_historical_data_daily(ticker):
     params = {
         "symbol": ticker,
-        "outputsize": "full",
-        "function": "TIME_SERIES_DAILY"
+        "outputsize": "full"
     }
     data = fetch_alpha_vantage_data("TIME_SERIES_DAILY", params)
     if data and "Time Series (Daily)" in data:
         time_series = data["Time Series (Daily)"]
         dates = []
         prices = []
-        for timestamp, values in sorted(time_series.items(), reverse=True)[:252]:
+        for date, values in sorted(time_series.items(), reverse=True):
             price = parse_float(values["4. close"])
             if price != "N/A":
-                dates.append(timestamp)
+                dates.append(date)
                 prices.append(price)
+        logger.info(f"Fetched {len(dates)} daily historical entries for {ticker}")
         return {"dates": dates, "prices": prices}
+    logger.warning(f"No daily historical data found for {ticker}")
     return {"dates": [], "prices": []}
 
 @app.get("/scrape/{ticker}")
@@ -320,7 +323,7 @@ async def scrape_ticker(ticker: str):
 
     logger.info(f"Fetching data for ticker: {ticker}")
 
-    # Fetch historical data
+    # Fetch historical data (intraday)
     historical_data = get_historical_data(ticker)
     historical_dates = historical_data["dates"]
     prices = historical_data["prices"]
@@ -344,7 +347,7 @@ async def scrape_ticker(ticker: str):
         overview_data = get_company_overview(ticker)
         market_cap = overview_data["market_cap"]
 
-    # Fetch daily historical data for future Beta calculations
+    # Fetch daily historical data for metrics and historical data
     historical_data_daily = get_historical_data_daily(ticker)
     historical_dates_daily = historical_data_daily["dates"]
     prices_daily = historical_data_daily["prices"]
