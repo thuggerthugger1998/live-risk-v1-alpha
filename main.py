@@ -355,23 +355,18 @@ def adjust_for_currency(ticker, dates, prices, frequency):
     adjusted_prices = []
 
     for i, date in enumerate(dates):
-        // Find the closest forex rate for the date
-        closest_rate = null;
-        for (let j = 0; j < forex_dates.length; j++) {
-            if (forex_dates[j] <= date) {
-                closest_rate = forex_rates[j];
-                break;
-            }
-        }
-        if (closest_rate === null) {
-            closest_rate = forex_rates[forex_rates.length - 1] || 1.0;  // Fallback to earliest rate
-        }
-        const adjusted_price = prices[i] * closest_rate;
-        adjusted_prices.push(adjusted_price);
-    }
+        # Find the closest forex rate for the date
+        closest_rate = None
+        for j, forex_date in enumerate(forex_dates):
+            if forex_date <= date:
+                closest_rate = forex_rates[j]
+                break
+        if closest_rate is None:
+            closest_rate = forex_rates[-1] if forex_rates else 1.0  # Fallback to earliest rate
+        adjusted_price = prices[i] * closest_rate
+        adjusted_prices.append(adjusted_price)
 
-    return dates, adjusted_prices;
-}
+    return dates, adjusted_prices
 
 def get_historical_data_daily(ticker):
     params = {
