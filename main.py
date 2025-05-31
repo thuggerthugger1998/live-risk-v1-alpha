@@ -295,6 +295,84 @@ def get_company_overview(ticker):
     logger.warning(f"No company overview data found for {ticker}")
     return {"market_cap": "N/A", "shares": "N/A"}
 
+# Map ticker suffixes to currencies (simplified mapping)
+def get_currency(ticker):
+    suffix_to_currency = {
+        ".ST": "SEK",  # Stockholm (e.g., AAC.ST)
+        ".PA": "EUR",  # Paris (e.g., ETL.PA, SAF.PA, HO.PA, SESG.PA)
+        ".MI": "EUR",  # Milan (e.g., LDO.MI)
+        ".DE": "EUR",  # Germany (e.g., RHM.DE, OHB.DE)
+        ".OL": "NOK",  # Oslo (e.g., ARCH.OL)
+        ".AX": "AUD",  # Australia (e.g., TTT.AX)
+        ".T": "JPY",   # Tokyo (e.g., 6301.T, 9412.T)
+        ".TO": "CAD",  # Toronto (e.g., MAL.TO, MDA.TO)
+        ".L": "GBP",   # London (e.g., BA.L)
+    }
+    for suffix, currency in suffix_to_currency.items():
+        if ticker.endswith(suffix):
+            return currency
+    return "USD"  # Default to USD for US stocks (e.g., TSLA, NVDA)
+
+def fetch_forex_data(from_currency, to_currency, frequency="daily"):
+    if from_currency == to_currency:
+        return None  # No conversion needed
+    function = {"daily": "FX_DAILY", "weekly": "FX_WEEKLY", "monthly": "FX_MONTHLY"}[frequency]
+    params = {
+        "from_symbol": from_currency,
+        "to_symbol": to_currency,
+        "outputsize": "full"
+    }
+    data = fetch_alpha_vantage_data(function, params)
+    if data:
+        time_series_key = f"Time Series FX ({frequency.capitalize()})"
+        if time_series_key in data:
+            time_series = data[time_series_key]
+            dates = []
+            rates = []
+            for date, values in sorted(time_series.items(), reverse=True):
+                rate = parse_float(values["4. close"])
+                if rate != "N/A":
+                    dates.append(date)
+                    rates.append(rate)
+            logger.info(f"Fetched {len(dates)} {frequency} forex entries for {from_currency}/{to_currency}, most recent date: {dates[0] if dates else 'N/A'}")
+            return {"dates": dates, "rates": rates}
+    logger.warning(f"No forex data found for {from_currency}/{to_currency} ({frequency})")
+    return {"dates": [], "rates": []}
+
+def adjust_for_currency(ticker, dates, prices, frequency):
+    currency = get_currency(ticker)
+    if currency == "USD":
+        return dates, prices  # No adjustment needed for USD stocks
+    
+    # Fetch forex data
+    forex_data = fetch_forex_data(currency, "USD", frequency)
+    if not forex_data or not forex_data["dates"]:
+        logger.warning(f"No forex data available for {currency}/USD, using unadjusted prices for {ticker}")
+        return dates, prices
+
+    forex_dates = forex_data["dates"]
+    forex_rates = forex_data["rates"]
+    adjusted_prices = []
+
+    for i, date in enumerate(dates):
+        // Find the closest forex rate for the date
+        closest_rate = null;
+        for (let j = 0; j < forex_dates.length; j++) {
+            if (forex_dates[j] <= date) {
+                closest_rate = forex_rates[j];
+                break;
+            }
+        }
+        if (closest_rate === null) {
+            closest_rate = forex_rates[forex_rates.length - 1] || 1.0;  // Fallback to earliest rate
+        }
+        const adjusted_price = prices[i] * closest_rate;
+        adjusted_prices.push(adjusted_price);
+    }
+
+    return dates, adjusted_prices;
+}
+
 def get_historical_data_daily(ticker):
     params = {
         "symbol": ticker,
@@ -305,14 +383,36 @@ def get_historical_data_daily(ticker):
         time_series = data["Time Series (Daily)"]
         dates = []
         prices = []
-        for date, values in sorted(time_series.items(), reverse=True)[:252]:  # Limit to last 252 trading days (1 year)
+        for date, values in sorted(time_series.items(), reverse=True):
             price = parse_float(values["4. close"])
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
         logger.info(f"Fetched {len(dates)} daily historical entries for {ticker}, most recent date: {dates[0] if dates else 'N/A'}")
+        dates, prices = adjust_for_currency(ticker, dates, prices, "daily")
         return {"dates": dates, "prices": prices}
     logger.warning(f"No daily historical data found for {ticker}")
+    return {"dates": [], "prices": []}
+
+def get_historical_data_weekly(ticker):
+    params = {
+        "symbol": ticker,
+        "outputsize": "full"
+    }
+    data = fetch_alpha_vantage_data("TIME_SERIES_WEEKLY", params)
+    if data and "Weekly Time Series" in data:
+        time_series = data["Weekly Time Series"]
+        dates = []
+        prices = []
+        for date, values in sorted(time_series.items(), reverse=True):
+            price = parse_float(values["4. close"])
+            if price != "N/A":
+                dates.append(date)
+                prices.append(price)
+        logger.info(f"Fetched {len(dates)} weekly historical entries for {ticker}, most recent date: {dates[0] if dates else 'N/A'}")
+        dates, prices = adjust_for_currency(ticker, dates, prices, "weekly")
+        return {"dates": dates, "prices": prices}
+    logger.warning(f"No weekly historical data found for {ticker}")
     return {"dates": [], "prices": []}
 
 def get_historical_data_monthly(ticker):
@@ -327,14 +427,13 @@ def get_historical_data_monthly(ticker):
         prices = []
         count = 0
         for date, values in sorted(time_series.items(), reverse=True):
-            if count >= 120:  # Limit to 10 years (120 months)
-                break
             price = parse_float(values["4. close"])
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
                 count += 1
         logger.info(f"Fetched {len(dates)} monthly historical entries for {ticker}, most recent date: {dates[0] if dates else 'N/A'}")
+        dates, prices = adjust_for_currency(ticker, dates, prices, "monthly")
         return {"dates": dates, "prices": prices}
     logger.warning(f"No monthly historical data found for {ticker}")
     return {"dates": [], "prices": []}
@@ -441,6 +540,40 @@ async def scrape_ticker(ticker: str):
 
     return result
 
+@app.get("/scrape-weekly/{ticker}")
+async def scrape_ticker_weekly(ticker: str):
+    # Check cache
+    cache_key = f"{ticker}_weekly_data"
+    cached_data = cache.get(cache_key)
+    current_time = datetime.now(timezone.utc)
+    if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
+        logger.info(f"Returning cached weekly data for {ticker}")
+        return cached_data["data"]
+
+    logger.info(f"Fetching weekly data for ticker: {ticker}")
+
+    # Add a delay to avoid rate limiting
+    time.sleep(3)  # 3-second delay between requests
+
+    # Fetch weekly historical data
+    historical_data_weekly = get_historical_data_weekly(ticker)
+    historical_dates_weekly = historical_data_weekly["dates"]
+    prices_weekly = historical_data_weekly["prices"]
+
+    # Cache the result (only if historical data is present)
+    result = {
+        "ticker": ticker,
+        "historical_dates_weekly": historical_dates_weekly,
+        "historical_prices_weekly": prices_weekly
+    }
+
+    if historical_dates_weekly:
+        cache[cache_key] = {"data": result, "timestamp": current_time}
+    else:
+        logger.warning(f"Not caching weekly response for {ticker} due to missing historical data")
+
+    return result
+
 @app.get("/scrape-monthly/{ticker}")
 async def scrape_ticker_monthly(ticker: str):
     # Check cache
@@ -456,7 +589,7 @@ async def scrape_ticker_monthly(ticker: str):
     # Add a delay to avoid rate limiting
     time.sleep(3)  # 3-second delay between requests
 
-    # Fetch monthly historical data for beta calculations
+    # Fetch monthly historical data
     historical_data_monthly = get_historical_data_monthly(ticker)
     historical_dates_monthly = historical_data_monthly["dates"]
     prices_monthly = historical_data_monthly["prices"]
@@ -472,6 +605,36 @@ async def scrape_ticker_monthly(ticker: str):
         cache[cache_key] = {"data": result, "timestamp": current_time}
     else:
         logger.warning(f"Not caching monthly response for {ticker} due to missing historical data")
+
+    return result
+
+@app.get("/forex/{from_currency}/{to_currency}/{frequency}")
+async def get_forex_data(from_currency: str, to_currency: str, frequency: str):
+    cache_key = f"forex_{from_currency}_{to_currency}_{frequency}"
+    cached_data = cache.get(cache_key)
+    current_time = datetime.now(timezone.utc)
+    if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
+        logger.info(f"Returning cached forex data for {from_currency}/{to_currency} ({frequency})")
+        return cached_data["data"]
+
+    logger.info(f"Fetching {frequency} forex data for {from_currency}/{to_currency}")
+
+    # Add a delay to avoid rate limiting
+    time.sleep(3)  # 3-second delay between requests
+
+    forex_data = fetch_forex_data(from_currency, to_currency, frequency)
+    result = {
+        "from_currency": from_currency,
+        "to_currency": to_currency,
+        "frequency": frequency,
+        "dates": forex_data["dates"],
+        "rates": forex_data["rates"]
+    }
+
+    if forex_data["dates"]:
+        cache[cache_key] = {"data": result, "timestamp": current_time}
+    else:
+        logger.warning(f"Not caching forex response for {from_currency}/{to_currency} due to missing data")
 
     return result
 
