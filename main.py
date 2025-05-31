@@ -352,7 +352,7 @@ async def scrape_ticker(ticker: str):
     logger.info(f"Fetching data for ticker: {ticker}")
 
     # Add a delay to avoid rate limiting
-    time.sleep(5)  # 5-second delay between requests
+    time.sleep(3)  # 3-second delay between requests
 
     # Fetch historical data (intraday)
     historical_data = get_historical_data(ticker)
@@ -454,7 +454,7 @@ async def scrape_ticker_monthly(ticker: str):
     logger.info(f"Fetching monthly data for ticker: {ticker}")
 
     # Add a delay to avoid rate limiting
-    time.sleep(5)  # 5-second delay between requests
+    time.sleep(3)  # 3-second delay between requests
 
     # Fetch monthly historical data for beta calculations
     historical_data_monthly = get_historical_data_monthly(ticker)
