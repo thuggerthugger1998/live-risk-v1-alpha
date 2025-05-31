@@ -61,30 +61,48 @@ def fetch_alpha_vantage_data(endpoint, params):
     base_url = "https://www.alphavantage.co/query"
     params["apikey"] = ALPHA_VANTAGE_API_KEY
     params["function"] = endpoint
-    try:
-        logger.info(f"Making request to {base_url} with params: {params}")
-        response = session.get(base_url, params=params, timeout=10)
-        response.raise_for_status()
-        logger.info(f"Response status code: {response.status_code}")
-        logger.info(f"Response headers: {response.headers}")
-        if endpoint == "EARNINGS_CALENDAR":
-            logger.info(f"Raw CSV response: {response.text[:1000]!r}...")
-            return response.text
-        data = response.json()
-        logger.info(f"Raw JSON response: {data}")
-        if "Error Message" in data:
-            logger.error(f"API error for {endpoint}: {data['Error Message']}")
+    max_attempts = 3
+    attempt = 1
+    while attempt <= max_attempts:
+        try:
+            logger.info(f"Attempt {attempt}: Making request to {base_url} with params: {params}")
+            response = session.get(base_url, params=params, timeout=10)
+            response.raise_for_status()
+            logger.info(f"Response status code: {response.status_code}")
+            logger.info(f"Response headers: {response.headers}")
+            if endpoint == "EARNINGS_CALENDAR":
+                logger.info(f"Raw CSV response: {response.text[:1000]!r}...")
+                return response.text
+            data = response.json()
+            logger.info(f"Raw JSON response: {data}")
+            if "Error Message" in data:
+                logger.error(f"API error for {endpoint}: {data['Error Message']}")
+                return None
+            if "Information" in data and "Thank you for using Alpha Vantage" in data["Information"]:
+                logger.error(f"Rate limit exceeded for {endpoint}")
+                if attempt < max_attempts:
+                    logger.info(f"Retrying after 30 seconds...")
+                    time.sleep(30)  # Wait 30 seconds before retrying
+                    attempt += 1
+                    continue
+                return None
+            if "Note" in data:
+                logger.error(f"API note for {endpoint}: {data['Note']}")
+                if attempt < max_attempts:
+                    logger.info(f"Retrying after 30 seconds...")
+                    time.sleep(30)
+                    attempt += 1
+                    continue
+                return None
+            return data
+        except Exception as e:
+            logger.error(f"Error fetching data from Alpha Vantage for {endpoint}: {e}")
+            if attempt < max_attempts:
+                logger.info(f"Retrying after 30 seconds...")
+                time.sleep(30)
+                attempt += 1
+                continue
             return None
-        if "Information" in data and "Thank you for using Alpha Vantage" in data["Information"]:
-            logger.error(f"Rate limit exceeded for {endpoint}")
-            return None
-        if "Note" in data:
-            logger.error(f"API note for {endpoint}: {data['Note']}")
-            return None
-        return data
-    except Exception as e:
-        logger.error(f"Error fetching data from Alpha Vantage for {endpoint}: {e}")
-        return None
 
 def fetch_alpha_vantage_earnings(ticker):
     horizons = ["3month", "6month", "12month"]
@@ -287,7 +305,7 @@ def get_historical_data_daily(ticker):
         time_series = data["Time Series (Daily)"]
         dates = []
         prices = []
-        for date, values in sorted(time_series.items(), reverse=True):
+        for date, values in sorted(time_series.items(), reverse=True)[:252]:  # Limit to last 252 trading days (1 year)
             price = parse_float(values["4. close"])
             if price != "N/A":
                 dates.append(date)
@@ -295,6 +313,30 @@ def get_historical_data_daily(ticker):
         logger.info(f"Fetched {len(dates)} daily historical entries for {ticker}, most recent date: {dates[0] if dates else 'N/A'}")
         return {"dates": dates, "prices": prices}
     logger.warning(f"No daily historical data found for {ticker}")
+    return {"dates": [], "prices": []}
+
+def get_historical_data_monthly(ticker):
+    params = {
+        "symbol": ticker,
+        "outputsize": "full"
+    }
+    data = fetch_alpha_vantage_data("TIME_SERIES_MONTHLY", params)
+    if data and "Monthly Time Series" in data:
+        time_series = data["Monthly Time Series"]
+        dates = []
+        prices = []
+        count = 0
+        for date, values in sorted(time_series.items(), reverse=True):
+            if count >= 120:  # Limit to 10 years (120 months)
+                break
+            price = parse_float(values["4. close"])
+            if price != "N/A":
+                dates.append(date)
+                prices.append(price)
+                count += 1
+        logger.info(f"Fetched {len(dates)} monthly historical entries for {ticker}, most recent date: {dates[0] if dates else 'N/A'}")
+        return {"dates": dates, "prices": prices}
+    logger.warning(f"No monthly historical data found for {ticker}")
     return {"dates": [], "prices": []}
 
 @app.get("/scrape/{ticker}")
@@ -309,8 +351,8 @@ async def scrape_ticker(ticker: str):
 
     logger.info(f"Fetching data for ticker: {ticker}")
 
-    # Add a delay to avoid rate limiting (91 tickers every 5 minutes exceeds 500 calls/day)
-    time.sleep(1)  # 1-second delay between requests
+    # Add a delay to avoid rate limiting
+    time.sleep(5)  # 5-second delay between requests
 
     # Fetch historical data (intraday)
     historical_data = get_historical_data(ticker)
@@ -392,11 +434,44 @@ async def scrape_ticker(ticker: str):
     if ticker != "SPY":
         result["market_cap"] = market_cap
 
-    # Cache only if historical data is present
     if historical_dates_daily:
         cache[cache_key] = {"data": result, "timestamp": current_time}
     else:
         logger.warning(f"Not caching response for {ticker} due to missing historical data")
+
+    return result
+
+@app.get("/scrape-monthly/{ticker}")
+async def scrape_ticker_monthly(ticker: str):
+    # Check cache
+    cache_key = f"{ticker}_monthly_data"
+    cached_data = cache.get(cache_key)
+    current_time = datetime.now(timezone.utc)
+    if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
+        logger.info(f"Returning cached monthly data for {ticker}")
+        return cached_data["data"]
+
+    logger.info(f"Fetching monthly data for ticker: {ticker}")
+
+    # Add a delay to avoid rate limiting
+    time.sleep(5)  # 5-second delay between requests
+
+    # Fetch monthly historical data for beta calculations
+    historical_data_monthly = get_historical_data_monthly(ticker)
+    historical_dates_monthly = historical_data_monthly["dates"]
+    prices_monthly = historical_data_monthly["prices"]
+
+    # Cache the result (only if historical data is present)
+    result = {
+        "ticker": ticker,
+        "historical_dates_monthly": historical_dates_monthly,
+        "historical_prices_monthly": prices_monthly
+    }
+
+    if historical_dates_monthly:
+        cache[cache_key] = {"data": result, "timestamp": current_time}
+    else:
+        logger.warning(f"Not caching monthly response for {ticker} due to missing historical data")
 
     return result
 
