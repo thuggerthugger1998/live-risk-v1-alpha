@@ -290,10 +290,11 @@ def get_company_overview(ticker):
     if data:
         return {
             "market_cap": parse_float(data.get("MarketCapitalization", "N/A")),
-            "shares": parse_float(data.get("SharesOutstanding", "N/A"))
+            "shares": parse_float(data.get("SharesOutstanding", "N/A")),
+            "company_name": data.get("Name", "N/A")  # Added company name
         }
     logger.warning(f"No company overview data found for {ticker}")
-    return {"market_cap": "N/A", "shares": "N/A"}
+    return {"market_cap": "N/A", "shares": "N/A", "company_name": "N/A"}  # Added company name with default
 
 # Map ticker suffixes to currencies (simplified mapping)
 def get_currency(ticker):
@@ -466,11 +467,13 @@ async def scrape_ticker(ticker: str):
     if short_interest != "N/A" and float_shares != "N/A" and float_shares != 0:
         short_percent = round((short_interest / float_shares) * 100, 2)
 
-    # Fetch company overview for market cap and shares (only for non-ETFs)
+    # Fetch company overview for market cap, shares, and company name (only for non-ETFs)
     market_cap = "N/A"
+    company_name = "N/A"
     if ticker != "SPY":
         overview_data = get_company_overview(ticker)
         market_cap = overview_data["market_cap"]
+        company_name = overview_data["company_name"]  # Added company name
 
     # Fetch daily historical data for metrics and historical data
     historical_data_daily = get_historical_data_daily(ticker)
@@ -523,7 +526,8 @@ async def scrape_ticker(ticker: str):
         "historical_dates": historical_dates,
         "historical_prices": prices,
         "historical_dates_daily": historical_dates_daily,
-        "historical_prices_daily": prices_daily
+        "historical_prices_daily": prices_daily,
+        "company_name": company_name  # Added company name to result
     }
     if ticker != "SPY":
         result["market_cap"] = market_cap
