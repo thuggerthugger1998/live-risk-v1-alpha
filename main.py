@@ -514,6 +514,8 @@ async def scrape_ticker(ticker: str):
     # Cache the result (only if historical data is present)
     result = {
         "ticker": ticker,
+        "company_name": company_name,
+        "country": country
         "next_report_date": next_report_date,
         "short_interest": short_interest,
         "short_percent_of_float": str(short_percent),
@@ -527,7 +529,6 @@ async def scrape_ticker(ticker: str):
         "historical_prices": prices,
         "historical_dates_daily": historical_dates_daily,
         "historical_prices_daily": prices_daily,
-        "company_name": company_name  # Added company name to result
     }
     if ticker != "SPY":
         result["market_cap"] = market_cap
