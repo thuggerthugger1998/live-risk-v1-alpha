@@ -82,7 +82,7 @@ def fetch_alpha_vantage_data(endpoint, params):
                 logger.error(f"Rate limit exceeded for {endpoint}")
                 if attempt < max_attempts:
                     logger.info(f"Retrying after 30 seconds...")
-                    time.sleep(30)  # Wait 30 seconds before retrying
+                    time.sleep(30)
                     attempt += 1
                     continue
                 return None
@@ -292,12 +292,11 @@ def get_company_overview(ticker):
             "market_cap": parse_float(data.get("MarketCapitalization", "N/A")),
             "shares": parse_float(data.get("SharesOutstanding", "N/A")),
             "company_name": data.get("Name", "N/A"),
-            "country": data.get("Country", "N/A")  # Added nationality (country)
+            "country": data.get("Country", "N/A")
         }
     logger.warning(f"No company overview data found for {ticker}")
-    return {"market_cap": "N/A", "shares": "N/A", "company_name": "N/A", "country": "N/A"}  # Added country with default
+    return {"market_cap": "N/A", "shares": "N/A", "company_name": "N/A", "country": "N/A"}
 
-# Map ticker suffixes to currencies (simplified mapping)
 def get_currency(ticker):
     suffix_to_currency = {
         ".ST": "SEK",  # Stockholm (e.g., AAC.ST)
@@ -317,57 +316,54 @@ def get_currency(ticker):
 
 def fetch_forex_data(from_currency, to_currency, frequency="daily"):
     if from_currency == to_currency:
-        return None  # No conversion needed
-    function = {"daily": "FX_DAILY", "weekly": "FX_WEEKLY", "monthly": "FX_MONTHLY"}[frequency]
+        logger.info(f"No conversion needed for {from_currency}/{to_currency}")
+        return {"dates": [], "rates": []}
+    function = {"daily": "FX_DAILY", "weekly": "FX_WEEKLY", "monthly": "FX_MONTHLY"}.get(frequency, "FX_DAILY")
     params = {
         "from_symbol": from_currency,
         "to_symbol": to_currency,
         "outputsize": "full"
     }
     data = fetch_alpha_vantage_data(function, params)
-    if data:
-        time_series_key = f"Time Series FX ({frequency.capitalize()})"
-        if time_series_key in data:
-            time_series = data[time_series_key]
-            dates = []
-            rates = []
-            for date, values in sorted(time_series.items(), reverse=True):
-                rate = parse_float(values["4. close"])
-                if rate != "N/A":
-                    dates.append(date)
-                    rates.append(rate)
-            logger.info(f"Fetched {len(dates)} {frequency} forex entries for {from_currency}/{to_currency}, most recent date: {dates[0] if dates else 'N/A'}")
-            return {"dates": dates, "rates": rates}
-    logger.warning(f"No forex data found for {from_currency}/{to_currency} ({frequency})")
-    return {"dates": [], "rates": []}
+    if not data:
+        logger.error(f"Failed to fetch forex data for {from_currency}/{to_currency} ({frequency})")
+        return {"dates": [], "rates": []}
+    time_series_key = f"Time Series FX ({frequency.capitalize()})"
+    if time_series_key not in data:
+        logger.error(f"Invalid response format for {from_currency}/{to_currency}: {data}")
+        return {"dates": [], "rates": []}
+    time_series = data[time_series_key]
+    dates = []
+    rates = []
+    for date, values in sorted(time_series.items(), reverse=True):
+        rate = parse_float(values.get("4. close", "N/A"))
+        if rate != "N/A":
+            dates.append(date)
+            rates.append(rate)
+    logger.info(f"Fetched {len(dates)} {frequency} forex entries for {from_currency}/{to_currency}, most recent date: {dates[0] if dates else 'N/A'}")
+    return {"dates": dates, "rates": rates}
 
 def adjust_for_currency(ticker, dates, prices, frequency):
     currency = get_currency(ticker)
     if currency == "USD":
-        return dates, prices  # No adjustment needed for USD stocks
-    
-    # Fetch forex data
+        return dates, prices
     forex_data = fetch_forex_data(currency, "USD", frequency)
     if not forex_data or not forex_data["dates"]:
         logger.warning(f"No forex data available for {currency}/USD, using unadjusted prices for {ticker}")
         return dates, prices
-
     forex_dates = forex_data["dates"]
     forex_rates = forex_data["rates"]
     adjusted_prices = []
-
     for i, date in enumerate(dates):
-        # Find the closest forex rate for the date
         closest_rate = None
         for j, forex_date in enumerate(forex_dates):
             if forex_date <= date:
                 closest_rate = forex_rates[j]
                 break
         if closest_rate is None:
-            closest_rate = forex_rates[-1] if forex_rates else 1.0  # Fallback to earliest rate
+            closest_rate = forex_rates[-1] if forex_rates else 1.0
         adjusted_price = prices[i] * closest_rate
         adjusted_prices.append(adjusted_price)
-
     return dates, adjusted_prices
 
 def get_historical_data_daily(ticker):
@@ -422,13 +418,11 @@ def get_historical_data_monthly(ticker):
         time_series = data["Monthly Time Series"]
         dates = []
         prices = []
-        count = 0
         for date, values in sorted(time_series.items(), reverse=True):
             price = parse_float(values["4. close"])
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
-                count += 1
         logger.info(f"Fetched {len(dates)} monthly historical entries for {ticker}, most recent date: {dates[0] if dates else 'N/A'}")
         dates, prices = adjust_for_currency(ticker, dates, prices, "monthly")
         return {"dates": dates, "prices": prices}
@@ -437,7 +431,6 @@ def get_historical_data_monthly(ticker):
 
 @app.get("/scrape/{ticker}")
 async def scrape_ticker(ticker: str):
-    # Check cache
     cache_key = f"{ticker}_data"
     cached_data = cache.get(cache_key)
     current_time = datetime.now(timezone.utc)
@@ -446,29 +439,21 @@ async def scrape_ticker(ticker: str):
         return cached_data["data"]
 
     logger.info(f"Fetching data for ticker: {ticker}")
+    time.sleep(3)  # Delay to avoid rate limiting
 
-    # Add a delay to avoid rate limiting
-    time.sleep(3)  # 3-second delay between requests
-
-    # Fetch historical data (intraday)
     historical_data = get_historical_data(ticker)
     historical_dates = historical_data["dates"]
     prices = historical_data["prices"]
 
-    # Fetch earnings date using Alpha Vantage
     next_report_date = get_earnings_date(ticker)
-
-    # Fetch short interest data using FMP
     short_data = get_short_interest_data(ticker)
     short_interest = short_data["short_interest"]
     float_shares = short_data["float_shares"]
 
-    # Calculate short_percent_of_float
     short_percent = "N/A"
     if short_interest != "N/A" and float_shares != "N/A" and float_shares != 0:
         short_percent = round((short_interest / float_shares) * 100, 2)
 
-    # Fetch company overview for market cap, shares, company name, and country (only for non-ETFs)
     market_cap = "N/A"
     company_name = "N/A"
     country = "N/A"
@@ -476,17 +461,14 @@ async def scrape_ticker(ticker: str):
         overview_data = get_company_overview(ticker)
         market_cap = overview_data["market_cap"]
         company_name = overview_data["company_name"]
-        country = overview_data["country"]  # Added nationality (country)
+        country = overview_data["country"]
 
-    # Fetch daily historical data for metrics and historical data
     historical_data_daily = get_historical_data_daily(ticker)
     historical_dates_daily = historical_data_daily["dates"]
     prices_daily = historical_data_daily["prices"]
 
-    # Calculate days_to_cover
     days_to_cover = "N/A"
 
-    # Calculate metrics
     daily_returns = []
     for j in range(1, min(len(prices_daily), 31)):
         if prices_daily[j] and prices_daily[j - 1]:
@@ -514,7 +496,6 @@ async def scrape_ticker(ticker: str):
     if annual_volatility != "N/A":
         annual_volatility = round(annual_volatility, 4)
 
-    # Cache the result (only if historical data is present)
     result = {
         "ticker": ticker,
         "company_name": company_name,
@@ -532,7 +513,6 @@ async def scrape_ticker(ticker: str):
         "historical_prices": prices,
         "historical_dates_daily": historical_dates_daily,
         "historical_prices_daily": prices_daily
-        
     }
     if ticker != "SPY":
         result["market_cap"] = market_cap
@@ -546,7 +526,6 @@ async def scrape_ticker(ticker: str):
 
 @app.get("/scrape-weekly/{ticker}")
 async def scrape_ticker_weekly(ticker: str):
-    # Check cache
     cache_key = f"{ticker}_weekly_data"
     cached_data = cache.get(cache_key)
     current_time = datetime.now(timezone.utc)
@@ -555,16 +534,12 @@ async def scrape_ticker_weekly(ticker: str):
         return cached_data["data"]
 
     logger.info(f"Fetching weekly data for ticker: {ticker}")
+    time.sleep(3)  # Delay to avoid rate limiting
 
-    # Add a delay to avoid rate limiting
-    time.sleep(3)  # 3-second delay between requests
-
-    # Fetch weekly historical data
     historical_data_weekly = get_historical_data_weekly(ticker)
     historical_dates_weekly = historical_data_weekly["dates"]
     prices_weekly = historical_data_weekly["prices"]
 
-    # Cache the result (only if historical data is present)
     result = {
         "ticker": ticker,
         "historical_dates_weekly": historical_dates_weekly,
@@ -580,7 +555,6 @@ async def scrape_ticker_weekly(ticker: str):
 
 @app.get("/scrape-monthly/{ticker}")
 async def scrape_ticker_monthly(ticker: str):
-    # Check cache
     cache_key = f"{ticker}_monthly_data"
     cached_data = cache.get(cache_key)
     current_time = datetime.now(timezone.utc)
@@ -589,16 +563,12 @@ async def scrape_ticker_monthly(ticker: str):
         return cached_data["data"]
 
     logger.info(f"Fetching monthly data for ticker: {ticker}")
+    time.sleep(3)  # Delay to avoid rate limiting
 
-    # Add a delay to avoid rate limiting
-    time.sleep(3)  # 3-second delay between requests
-
-    # Fetch monthly historical data
     historical_data_monthly = get_historical_data_monthly(ticker)
     historical_dates_monthly = historical_data_monthly["dates"]
     prices_monthly = historical_data_monthly["prices"]
 
-    # Cache the result (only if historical data is present)
     result = {
         "ticker": ticker,
         "historical_dates_monthly": historical_dates_monthly,
@@ -622,11 +592,10 @@ async def get_forex_data(from_currency: str, to_currency: str, frequency: str):
         return cached_data["data"]
 
     logger.info(f"Fetching {frequency} forex data for {from_currency}/{to_currency}")
-
-    # Add a delay to avoid rate limiting
-    time.sleep(3)  # 3-second delay between requests
-
     forex_data = fetch_forex_data(from_currency, to_currency, frequency)
+    if not forex_data["dates"]:
+        logger.warning(f"No forex data available for {from_currency}/{to_currency}")
+        raise HTTPException(status_code=404, detail="No forex data available")
     result = {
         "from_currency": from_currency,
         "to_currency": to_currency,
@@ -634,12 +603,7 @@ async def get_forex_data(from_currency: str, to_currency: str, frequency: str):
         "dates": forex_data["dates"],
         "rates": forex_data["rates"]
     }
-
-    if forex_data["dates"]:
-        cache[cache_key] = {"data": result, "timestamp": current_time}
-    else:
-        logger.warning(f"Not caching forex response for {from_currency}/{to_currency} due to missing data")
-
+    cache[cache_key] = {"data": result, "timestamp": current_time}
     return result
 
 def calculate_standard_deviation(returns):
