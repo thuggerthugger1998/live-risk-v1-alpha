@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import FastAPI, HTTPException
 import requests
 import re
@@ -10,6 +11,8 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 import csv
 from io import StringIO
+from pydantic import BaseModel
+from typing import List
 
 # Configure logging to both console and file
 logging.basicConfig(
@@ -45,6 +48,9 @@ CACHE_DURATION = 60  # Cache for 60 seconds
 session = requests.Session()
 retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 session.mount("https://", HTTPAdapter(max_retries=retries))
+
+# Semaphore for rate limiting (set to 75 for your paid Alpha Vantage plan)
+sem = asyncio.Semaphore(75)
 
 def parse_float(value):
     if not value or value == "N/A":
@@ -429,7 +435,6 @@ def get_historical_data_monthly(ticker):
     logger.warning(f"No monthly historical data found for {ticker}")
     return {"dates": [], "prices": []}
 
-@app.get("/scrape/{ticker}")
 async def scrape_ticker(ticker: str):
     cache_key = f"{ticker}_data"
     cached_data = cache.get(cache_key)
@@ -439,7 +444,7 @@ async def scrape_ticker(ticker: str):
         return cached_data["data"]
 
     logger.info(f"Fetching data for ticker: {ticker}")
-    time.sleep(3)  # Delay to avoid rate limiting
+    await asyncio.sleep(3)  # Delay to avoid rate limiting
 
     historical_data = get_historical_data(ticker)
     historical_dates = historical_data["dates"]
@@ -534,7 +539,7 @@ async def scrape_ticker_weekly(ticker: str):
         return cached_data["data"]
 
     logger.info(f"Fetching weekly data for ticker: {ticker}")
-    time.sleep(3)  # Delay to avoid rate limiting
+    await asyncio.sleep(3)  # Delay to avoid rate limiting
 
     historical_data_weekly = get_historical_data_weekly(ticker)
     historical_dates_weekly = historical_data_weekly["dates"]
@@ -563,7 +568,7 @@ async def scrape_ticker_monthly(ticker: str):
         return cached_data["data"]
 
     logger.info(f"Fetching monthly data for ticker: {ticker}")
-    time.sleep(3)  # Delay to avoid rate limiting
+    await asyncio.sleep(3)  # Delay to avoid rate limiting
 
     historical_data_monthly = get_historical_data_monthly(ticker)
     historical_dates_monthly = historical_data_monthly["dates"]
@@ -642,6 +647,25 @@ def calculate_rsi(prices, period=14):
         return 100
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
+
+# New batch endpoint model
+class TickerRequest(BaseModel):
+    tickers: List[str]
+
+# New batch endpoint
+@app.post("/scrape_batch")
+async def scrape_batch(request: TickerRequest):
+    async def process_ticker(ticker):
+        async with sem:
+            try:
+                return await scrape_ticker(ticker)
+            except Exception as e:
+                logger.error(f"Error processing {ticker}: {e}")
+                return {"ticker": ticker, "error": str(e)}
+
+    tasks = [process_ticker(ticker) for ticker in request.tickers]
+    results = await asyncio.gather(*tasks)
+    return results
 
 if __name__ == "__main__":
     import uvicorn
