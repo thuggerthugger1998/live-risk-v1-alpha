@@ -18,10 +18,10 @@ ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 
 # Initialize cache
 cache = {}
-CACHE_DURATION = 10  # Cache for 10 seconds
+CACHE_DURATION = 10
 
 session = requests.Session()
-retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
+retries = Retry(total=3, backoff_factor=0.2, status_forcelist=[429, 500, 502, 503, 504])
 session.mount("https://", HTTPAdapter(max_retries=retries))
 
 semaphore = asyncio.Semaphore(75)
@@ -42,7 +42,7 @@ def fetch_alpha_vantage_data(endpoint, params):
     params["apikey"] = ALPHA_VANTAGE_API_KEY
     params["function"] = endpoint
     try:
-        response = session.get(base_url, params=params, timeout=5)
+        response = session.get(base_url, params=params, timeout=3)
         response.raise_for_status()
         data = response.json()
         if "Error Message" in data or "Information" in data or "Note" in data:
@@ -54,7 +54,7 @@ def fetch_alpha_vantage_data(endpoint, params):
 def fetch_yahoo_data(ticker):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1d&interval=1m&includeAdjustedClose=true"
     try:
-        response = session.get(url, timeout=5)
+        response = session.get(url, timeout=3)
         response.raise_for_status()
         data = response.json()
         result = data.get("chart", {}).get("result", [{}])[0]
@@ -64,30 +64,13 @@ def fetch_yahoo_data(ticker):
         prices = result["indicators"]["adjclose"][0]["adjclose"]
         meta = result["meta"]
         dates = [datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") for ts in timestamps]
-        exchange_to_country = {
-            'Europe/Stockholm': 'Sweden', 'Europe/London': 'United Kingdom', 'Europe/Milan': 'Italy',
-            'Europe/Paris': 'France', 'Europe/Frankfurt': 'Germany', 'Australia/Sydney': 'Australia',
-            'Asia/Tokyo': 'Japan', 'America/Toronto': 'Canada', 'America/New_York': 'USA'
-        }
         return {
             "dates": dates,
             "prices": [parse_float(p) for p in prices if p is not None],
-            "company_name": meta.get("longName") or meta.get("shortName") or "N/A",
-            "country": exchange_to_country.get(meta.get("exchangeTimezoneName"), "Unknown"),
             "currency": meta.get("currency", "USD")
         }
     except Exception:
         return None
-
-def get_currency(ticker):
-    suffix_to_currency = {
-        ".ST": "SEK", ".PA": "EUR", ".MI": "EUR", ".DE": "EUR", ".OL": "NOK",
-        ".AX": "AUD", ".T": "JPY", ".TO": "CAD", ".L": "GBP"
-    }
-    for suffix, currency in suffix_to_currency.items():
-        if ticker.upper().endswith(suffix):
-            return currency
-    return "USD"
 
 def fetch_forex_rate(from_currency, to_currency):
     if from_currency == to_currency:
@@ -115,7 +98,7 @@ async def scrape_quote(ticker: str):
 
     is_foreign = bool(re.match(r'.*\.|^\d', ticker))
     if is_foreign:
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05)
         yahoo_data = fetch_yahoo_data(ticker)
         if yahoo_data:
             latest_price = parse_float(yahoo_data["prices"][0]) if yahoo_data["prices"] else "N/A"
@@ -124,8 +107,6 @@ async def scrape_quote(ticker: str):
                 latest_price *= rate
             result = {
                 "ticker": ticker,
-                "company_name": yahoo_data["company_name"],
-                "country": yahoo_data["country"],
                 "latest_date": yahoo_data["dates"][0] if yahoo_data["dates"] else "N/A",
                 "latest_price": latest_price
             }
@@ -133,24 +114,19 @@ async def scrape_quote(ticker: str):
             return result
         return {
             "ticker": ticker,
-            "company_name": "N/A",
-            "country": "N/A",
             "latest_date": "N/A",
             "latest_price": "N/A"
         }
 
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(0.05)
     params = {"symbol": ticker}
     data = fetch_alpha_vantage_data("GLOBAL_QUOTE", params)
     if data and "Global Quote" in data:
         quote = data["Global Quote"]
         latest_price = parse_float(quote.get("05. price", "N/A"))
         latest_date = quote.get("07. latest trading day", "N/A")
-        overview_data = fetch_alpha_vantage_data("OVERVIEW", params)
         result = {
             "ticker": ticker,
-            "company_name": overview_data.get("Name", "N/A") if overview_data else "N/A",
-            "country": overview_data.get("Country", "N/A") if overview_data else "N/A",
             "latest_date": latest_date,
             "latest_price": latest_price
         }
@@ -159,8 +135,6 @@ async def scrape_quote(ticker: str):
         return result
     return {
         "ticker": ticker,
-        "company_name": "N/A",
-        "country": "N/A",
         "latest_date": "N/A",
         "latest_price": "N/A"
     }
@@ -171,17 +145,7 @@ class TickerRequest(BaseModel):
 @app.post("/scrape_quote")
 async def scrape_quote_single(request: TickerRequest):
     async with semaphore:
-        try:
-            return await scrape_quote(request.ticker)
-        except Exception as e:
-            return {
-                "ticker": request.ticker,
-                "company_name": "N/A",
-                "country": "N/A",
-                "latest_date": "N/A",
-                "latest_price": "N/A",
-                "error": str(e)
-            }
+        return await scrape_quote(request.ticker)
 
 if __name__ == "__main__":
     import uvicorn
