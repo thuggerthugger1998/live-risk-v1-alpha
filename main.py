@@ -62,46 +62,6 @@ def fetch_alpha_vantage_data(endpoint, params):
         logger.error(f"Error fetching Alpha Vantage data: {e}")
         return None
 
-def fetch_yahoo_data(ticker):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1d&interval=1m&includeAdjustedClose=true"
-    try:
-        response = session.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        result = data.get("chart", {}).get("result", [{}])[0]
-        if not result or not result.get("timestamp") or not result.get("indicators", {}).get("adjclose"):
-            logger.error(f"No valid Yahoo data for {ticker}")
-            return None
-        timestamps = result["timestamp"]
-        prices = result["indicators"]["adjclose"][0]["adjclose"]
-        meta = result["meta"]
-        dates = [datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") for ts in timestamps]
-        return {
-            "dates": dates,
-            "prices": [parse_float(p) for p in prices if p is not None],
-            "currency": meta.get("currency", "USD")
-        }
-    except Exception as e:
-        logger.error(f"Error fetching Yahoo data for {ticker}: {e}")
-        return None
-
-def fetch_forex_rate(from_currency, to_currency):
-    if from_currency == to_currency:
-        return 1.0
-    cache_key = f"{from_currency}_{to_currency}"
-    cached_data = cache.get(cache_key)
-    current_time = datetime.now(timezone.utc)
-    if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < 3600:
-        return cached_data["rate"]
-    params = {"from_symbol": from_currency, "to_symbol": to_currency}
-    data = fetch_alpha_vantage_data("CURRENCY_EXCHANGE_RATE", params)
-    if data and "Realtime Currency Exchange Rate" in data:
-        rate = parse_float(data["Realtime Currency Exchange Rate"].get("5. Exchange Rate", "N/A"))
-        if rate != "N/A":
-            cache[cache_key] = {"rate": rate, "timestamp": current_time}
-            return rate
-    return 1.0
-
 async def scrape_quote(ticker: str):
     cache_key = f"{ticker}_quote"
     cached_data = cache.get(cache_key)
@@ -109,22 +69,9 @@ async def scrape_quote(ticker: str):
     if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
         return cached_data["data"]
 
+    # Skip international tickers
     is_foreign = bool(re.match(r'.*\.|^\d', ticker))
     if is_foreign:
-        await asyncio.sleep(0.05)
-        yahoo_data = fetch_yahoo_data(ticker)
-        if yahoo_data:
-            latest_price = parse_float(yahoo_data["prices"][0]) if yahoo_data["prices"] else "N/A"
-            if latest_price != "N/A" and yahoo_data["currency"] != "USD":
-                rate = fetch_forex_rate(yahoo_data["currency"], "USD")
-                latest_price *= rate
-            result = {
-                "ticker": ticker,
-                "latest_date": yahoo_data["dates"][0] if yahoo_data["dates"] else "N/A",
-                "latest_price": latest_price
-            }
-            cache[cache_key] = {"data": result, "timestamp": current_time}
-            return result
         return {
             "ticker": ticker,
             "latest_date": "N/A",
