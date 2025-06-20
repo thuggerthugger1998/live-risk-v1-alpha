@@ -190,7 +190,7 @@ def fetch_alpha_vantage_earnings(ticker):
                     report_datetime = report_datetime.replace(tzinfo=timezone.utc)
                     if report_datetime > current_time:
                         logger.info(f"Found upcoming earnings date for {ticker}: {report_datetime.strftime('%Y-%m-%d')}")
-                        return report_datetime.strftime('%Y-%m-%d')
+                        return report_datetime.strftime("%Y-%m-%d")
             logger.warning(f"No upcoming earnings date for {ticker} in full CSV, horizon {horizon}")
         except Exception as e:
             logger.error(f"Error parsing full earnings CSV for {ticker}, horizon {horizon}: {e}")
