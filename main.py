@@ -76,7 +76,7 @@ def fetch_alpha_vantage_data(endpoint, params):
                 return response.text
             data = response.json()
             if "Error Message" in data or "Information" in data or "Note" in data:
-                logger.error(f"API issue for {endpoint}: {data.get('Error Message') or data.get('Information') or data.get('Note')}")
+                logger.error(f"API error for {endpoint}: {data.get('Error Message', '') or data.get('Information', '') or data.get('Note', '')}")
                 if attempt < max_attempts:
                     time.sleep(30)
                     attempt += 1
@@ -131,116 +131,79 @@ def fetch_alpha_vantage_earnings(ticker):
     for horizon in horizons:
         params = {"symbol": ticker, "horizon": horizon}
         csv_data = fetch_alpha_vantage_data("EARNINGS_CALENDAR", params)
-        logger.info(f"Step 1: Fetched per-symbol CSV data for {ticker} with horizon {horizon}: {csv_data[:1000] if csv_data else None!r}...")
         if csv_data:
             try:
                 lines = csv_data.strip().splitlines()
-                logger.info(f"Step 2: Split per-symbol CSV into lines: {lines!r}")
                 if len(lines) < 2:
-                    logger.error(f"Step 3: Per-symbol CSV has no data rows (only header or empty): {lines}")
+                    logger.warning(f"No data rows in per-symbol CSV for {ticker}, horizon {horizon}")
                     continue
                 header = lines[0].split(',')
                 data_row = lines[1].split(',')
-                logger.info(f"Step 4: Header: {header!r}")
-                logger.info(f"Step 5: Data row: {data_row!r}")
                 if len(header) != len(data_row):
-                    logger.error(f"Step 6: Mismatch between header length ({len(header)}) and data row length ({len(data_row)})")
+                    logger.warning(f"Mismatch in CSV header and data for {ticker}, horizon {horizon}")
                     continue
                 row_dict = dict(zip(header, data_row))
-                logger.info(f"Step 7: Parsed row as dict: {row_dict!r}")
                 report_date = row_dict.get("reportDate", "").strip()
-                logger.info(f"Step 8: Extracted reportDate: {report_date!r}")
                 if not report_date:
-                    logger.error(f"Step 9: No reportDate found in row: {row_dict}")
+                    logger.warning(f"No reportDate for {ticker}, horizon {horizon}")
                     continue
-                try:
-                    report_datetime = datetime.strptime(report_date, "%m/%d/%y")
-                    if report_datetime.year < 2000:
-                        report_datetime = report_datetime.replace(year=report_datetime.year + 100)
-                    report_datetime = report_datetime.replace(tzinfo=timezone.utc)
-                    logger.info(f"Step 10: Parsed reportDate as datetime: {report_datetime}")
-                except ValueError as e:
-                    logger.error(f"Step 11: Failed to parse reportDate {report_date!r}: {e}")
-                    continue
-                report_date_formatted = report_datetime.strftime("%Y-%m-%d")
-                logger.info(f"Step 12: Comparing report date {report_date_formatted} ({report_datetime}) with current date {current_time}")
+                report_datetime = datetime.strptime(report_date, "%m/%d/%y")
+                if report_datetime.year < 2000:
+                    report_datetime = report_datetime.replace(year=report_datetime.year + 100)
+                report_datetime = report_datetime.replace(tzinfo=timezone.utc)
                 if report_datetime > current_time:
-                    logger.info(f"Step 13: Found upcoming earnings date for {ticker}: {report_date_formatted}")
-                    return report_date_formatted
-                else:
-                    logger.warning(f"Step 14: Report date {report_date_formatted} is not in the future for {ticker}")
-                    continue
+                    logger.info(f"Found upcoming earnings date for {ticker}: {report_datetime.strftime('%Y-%m-%d')}")
+                    return report_datetime.strftime("%Y-%m-%d")
             except Exception as e:
-                logger.error(f"Step 15: Error parsing per-symbol CSV for {ticker} with horizon {horizon}: {e}")
+                logger.error(f"Error parsing earnings CSV for {ticker}, horizon {horizon}: {e}")
                 continue
 
-    logger.info(f"Step 16: Falling back to full earnings calendar CSV for {ticker}")
     for horizon in horizons:
         if full_csv_cache and full_csv_timestamp and (current_time - full_csv_timestamp).total_seconds() < CACHE_DURATION:
-            logger.info(f"Step 17: Using cached full earnings calendar CSV")
             csv_data = full_csv_cache
+            logger.info(f"Using cached full earnings calendar for {ticker}, horizon {horizon}")
         else:
             params = {"horizon": horizon}
             csv_data = fetch_alpha_vantage_data("EARNINGS_CALENDAR", params)
-            logger.info(f"Step 18: Fetched full earnings calendar CSV with horizon {horizon}: {len(csv_data) if csv_data else 0} bytes")
             if csv_data:
                 full_csv_cache = csv_data
                 full_csv_timestamp = current_time
+                logger.info(f"Updated full earnings calendar cache for horizon {horizon}")
             else:
-                logger.error(f"Step 19: Failed to fetch full earnings calendar CSV with horizon {horizon}")
+                logger.warning(f"Failed to fetch full earnings calendar for horizon {horizon}")
                 continue
         try:
             lines = csv_data.strip().splitlines()
-            logger.info(f"Step 20: Split full CSV into {len(lines)} lines")
             if len(lines) < 2:
-                logger.error(f"Step 21: Full CSV has no data rows (only header or empty)")
+                logger.warning(f"No data rows in full CSV for horizon {horizon}")
                 continue
             csv_reader = csv.DictReader(lines)
             for row in csv_reader:
                 if row.get("symbol") == ticker:
-                    logger.info(f"Step 22: Found row for {ticker}: {row}")
                     report_date = row.get("reportDate", "").strip()
-                    logger.info(f"Step 23: Extracted reportDate: {report_date!r}")
                     if not report_date:
-                        logger.error(f"Step 24: No reportDate found for {ticker}")
+                        logger.warning(f"No reportDate for {ticker} in full CSV, horizon {horizon}")
                         continue
-                    try:
-                        report_datetime = datetime.strptime(report_date, "%m/%d/%y")
-                        if report_datetime.year < 2000:
-                            report_datetime = report_datetime.replace(year=report_datetime.year + 100)
-                        report_datetime = report_datetime.replace(tzinfo=timezone.utc)
-                        logger.info(f"Step 25: Parsed reportDate as datetime: {report_datetime}")
-                    except ValueError as e:
-                        logger.error(f"Step 26: Failed to parse reportDate {report_date!r}: {e}")
-                        continue
-                    report_date_formatted = report_datetime.strftime("%Y-%m-%d")
-                    logger.info(f"Step 27: Comparing report date {report_date_formatted} ({report_datetime}) with current date {current_time}")
+                    report_datetime = datetime.strptime(report_date, "%m/%d/%y")
+                    if report_datetime.year < 2000:
+                        report_datetime = report_datetime.replace(year=report_datetime.year + 100)
+                    report_datetime = report_datetime.replace(tzinfo=timezone.utc)
                     if report_datetime > current_time:
-                        logger.info(f"Step 28: Found upcoming earnings date for {ticker}: {report_date_formatted}")
-                        return report_date_formatted
-                    else:
-                        logger.warning(f"Step 29: Report date {report_date_formatted} is not in the future for {ticker}")
-                        continue
-            logger.warning(f"Step 30: No upcoming earnings date found for {ticker} in full CSV with horizon {horizon}")
+                        logger.info(f"Found upcoming earnings date for {ticker}: {report_datetime.strftime('%Y-%m-%d')}")
+                        return report_datetime.strftime('%Y-%m-%d')
+            logger.warning(f"No upcoming earnings date for {ticker} in full CSV, horizon {horizon}")
         except Exception as e:
-            logger.error(f"Step 31: Error parsing full earnings calendar CSV for {ticker} with horizon {horizon}: {e}")
+            logger.error(f"Error parsing full earnings CSV for {ticker}, horizon {horizon}: {e}")
             continue
-    logger.error(f"Step 32: Failed to find upcoming earnings date for {ticker} after all attempts")
+    logger.error(f"Failed to find upcoming earnings date for {ticker}")
     return "N/A"
 
 @app.get("/debug-earnings/{ticker}")
 async def debug_earnings(ticker: str):
-    params = {
-        "symbol": ticker,
-        "horizon": "3month"
-    }
+    params = {"symbol": ticker, "horizon": "3month"}
     per_symbol_csv = fetch_alpha_vantage_data("EARNINGS_CALENDAR", params)
-
-    params = {
-        "horizon": "3month"
-    }
+    params = {"horizon": "3month"}
     full_csv = fetch_alpha_vantage_data("EARNINGS_CALENDAR", params)
-
     return {
         "per_symbol_csv": per_symbol_csv,
         "full_csv_first_1000_chars": full_csv[:1000] if full_csv else None
@@ -268,8 +231,10 @@ def get_historical_data(ticker):
         dates = []
         prices = []
         for timestamp, values in sorted(time_series.items(), reverse=True):
-            price = parse_float(values["5. adjusted close"])
-            if price != "N/A":
+            price = parse_float(values.get("4. close", "N/A"))
+            if price == "N/A":
+                logger.warning(f"Missing '4. close' in intraday data for {ticker} at {timestamp}: {values}")
+            else:
                 dates.append(timestamp)
                 prices.append(price)
         if dates:
@@ -397,8 +362,10 @@ def get_historical_data_daily(ticker):
         dates = []
         prices = []
         for date, values in sorted(time_series.items(), reverse=True):
-            price = parse_float(values["5. adjusted close"])
-            if price != "N/A":
+            price = parse_float(values.get("5. adjusted close", "N/A"))
+            if price == "N/A":
+                logger.warning(f"Missing '5. adjusted close' in daily data for {ticker} at {date}: {values}")
+            else:
                 dates.append(date)
                 prices.append(price)
         if dates:
@@ -427,8 +394,10 @@ def get_historical_data_weekly(ticker):
         dates = []
         prices = []
         for date, values in sorted(time_series.items(), reverse=True):
-            price = parse_float(values["5. adjusted close"])
-            if price != "N/A":
+            price = parse_float(values.get("5. adjusted close", "N/A"))
+            if price == "N/A":
+                logger.warning(f"Missing '5. adjusted close' in weekly data for {ticker} at {date}: {values}")
+            else:
                 dates.append(date)
                 prices.append(price)
         if dates:
@@ -457,8 +426,10 @@ def get_historical_data_monthly(ticker):
         dates = []
         prices = []
         for date, values in sorted(time_series.items(), reverse=True):
-            price = parse_float(values["5. adjusted close"])
-            if price != "N/A":
+            price = parse_float(values.get("5. adjusted close", "N/A"))
+            if price == "N/A":
+                logger.warning(f"Missing '5. adjusted close' in monthly data for {ticker} at {date}: {values}")
+            else:
                 dates.append(date)
                 prices.append(price)
         if dates:
