@@ -3,7 +3,7 @@ from fastapi import FastAPI
 import requests
 import re
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 import os
 from requests.adapters import HTTPAdapter
