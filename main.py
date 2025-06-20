@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 import requests
 import re
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 import os
 import time
@@ -14,7 +14,7 @@ from io import StringIO
 from pydantic import BaseModel
 from typing import List
 
-# Configure logging to both console and file
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -28,28 +28,23 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Log the API keys to verify they’re loaded
 logger.info(f"Alpha Vantage API Key: {os.getenv('ALPHA_VANTAGE_API_KEY')}")
 logger.info(f"FMP API Key: {os.getenv('FMP_API_KEY')}")
 
 app = FastAPI()
 
-# API keys from .env
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 FMP_API_KEY = os.getenv("FMP_API_KEY")
 
-# Cache for storing recent data to reduce API calls
 cache = {}
 full_csv_cache = None
 full_csv_timestamp = None
-CACHE_DURATION = 10  # Cache for 10 seconds to support minute-by-minute updates
+CACHE_DURATION = 10
 
-# Set up requests session with retries
 session = requests.Session()
 retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 session.mount("https://", HTTPAdapter(max_retries=retries))
 
-# Semaphore for rate limiting (set to 75 for your paid Alpha Vantage plan)
 sem = asyncio.Semaphore(75)
 
 def parse_float(value):
@@ -74,201 +69,128 @@ def fetch_alpha_vantage_data(endpoint, params):
             logger.info(f"Attempt {attempt}: Making request to {base_url} with params: {params}")
             response = session.get(base_url, params=params, timeout=10)
             response.raise_for_status()
-            logger.info(f"Response status code: {response.status_code}")
-            logger.info(f"Response headers: {response.headers}")
             if endpoint == "EARNINGS_CALENDAR":
-                logger.info(f"Raw CSV response: {response.text[:1000]!r}...")
                 return response.text
             data = response.json()
-            logger.info(f"Raw JSON response: {data}")
-            if "Error Message" in data:
-                logger.error(f"API error for {endpoint}: {data['Error Message']}")
-                return None
-            if "Information" in data and "Thank you for using Alpha Vantage" in data["Information"]:
-                logger.error(f"Rate limit exceeded for {endpoint}")
+            if "Error Message" in data or "Information" in data or "Note" in data:
+                logger.error(f"API issue for {endpoint}: {data.get('Error Message') or data.get('Information') or data.get('Note')}")
                 if attempt < max_attempts:
-                    logger.info(f"Retrying after 30 seconds...")
-                    time.sleep(30)
-                    attempt += 1
-                    continue
-                return None
-            if "Note" in data:
-                logger.error(f"API note for {endpoint}: {data['Note']}")
-                if attempt < max_attempts:
-                    logger.info(f"Retrying after 30 seconds...")
                     time.sleep(30)
                     attempt += 1
                     continue
                 return None
             return data
         except Exception as e:
-            logger.error(f"Error fetching data from Alpha Vantage for {endpoint}: {e}")
+            logger.error(f"Error fetching data for {endpoint}: {e}")
             if attempt < max_attempts:
-                logger.info(f"Retrying after 30 seconds...")
                 time.sleep(30)
                 attempt += 1
                 continue
             return None
 
+def fetch_yahoo_data(ticker, range="1mo", interval="1d"):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={range}&interval={interval}&includeAdjustedClose=true"
+    try:
+        response = session.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        result = data.get("chart", {}).get("result", [{}])[0]
+        if not result or not result.get("timestamp") or not result.get("indicators", {}).get("adjclose"):
+            return None
+        timestamps = result["timestamp"]
+        prices = result["indicators"]["adjclose"][0]["adjclose"]
+        meta = result["meta"]
+        dates = [datetime.fromtimestamp(ts).strftime("%Y-%m-%d") for ts in timestamps]
+        exchange_to_country = {
+            'Europe/Stockholm': 'Sweden', 'Europe/London': 'United Kingdom', 'Europe/Milan': 'Italy',
+            'Europe/Paris': 'France', 'Europe/Berlin': 'Germany', 'Australia/Sydney': 'Australia',
+            'Asia/Tokyo': 'Japan', 'America/Toronto': 'Canada', 'America/New_York': 'USA'
+        }
+        return {
+            "dates": dates,
+            "prices": [parse_float(p) for p in prices if p is not None],
+            "company_name": meta.get("longName") or meta.get("shortName") or "N/A",
+            "country": exchange_to_country.get(meta.get("exchangeTimezoneName"), "Unknown"),
+            "currency": meta.get("currency", "USD")
+        }
+    except Exception as e:
+        logger.error(f"Error fetching Yahoo data for {ticker}: {e}")
+        return None
+
 def fetch_alpha_vantage_earnings(ticker):
     horizons = ["3month", "6month", "12month"]
     for horizon in horizons:
-        logger.info(f"Attempting to fetch earnings calendar with horizon: {horizon}")
-        params = {
-            "symbol": ticker,
-            "horizon": horizon
-        }
+        params = {"symbol": ticker, "horizon": horizon}
         csv_data = fetch_alpha_vantage_data("EARNINGS_CALENDAR", params)
-        logger.info(f"Step 1: Fetched per-symbol CSV data for {ticker} with horizon {horizon}: {csv_data[:1000] if csv_data else None!r}...")
-
         if csv_data:
             try:
                 lines = csv_data.strip().splitlines()
-                logger.info(f"Step 2: Split parsed per-symbol CSV into lines: {lines!r}")
-
                 if len(lines) < 2:
-                    logger.error(f"Step 3: Per-symbol CSV has no data rows (only header or empty): {lines}")
                     continue
-
                 header = lines[0].split(',')
                 data_row = lines[1].split(',')
-                logger.info(f"Step 4: Header: {header!r}")
-                logger.info(f"Step 5: Data row: {data_row!r}")
-
                 if len(header) != len(data_row):
-                    logger.error(f"Step 6: Mismatch between header length ({len(header)}) and data row length ({len(data_row)})")
                     continue
-
                 row_dict = dict(zip(header, data_row))
-                logger.info(f"Step 7: Parsed row as dict: {row_dict!r}")
-
                 report_date = row_dict.get("reportDate", "").strip()
-                logger.info(f"Step 8: Extracted reportDate: {report_date!r}")
-
                 if not report_date:
-                    logger.error(f"Step 9: No reportDate found in row: {row_dict}")
                     continue
+                report_datetime = datetime.strptime(report_date, "%m/%d/%y")
+                if report_datetime.year < 2000:
+                    report_datetime = report_datetime.replace(year=report_datetime.year + 100)
+                report_datetime = report_datetime.replace(tzinfo=timezone.utc)
+                current_time = datetime.now(timezone.utc)
+                if report_datetime > current_time:
+                    return report_datetime.strftime("%Y-%m-%d")
+            except Exception as e:
+                logger.error(f"Error parsing earnings CSV for {ticker}: {e}")
+                continue
 
-                try:
+    for horizon in horizons:
+        if full_csv_cache and full_csv_timestamp and (datetime.now(timezone.utc) - full_csv_timestamp).total_seconds() < CACHE_DURATION:
+            csv_data = full_csv_cache
+        else:
+            params = {"horizon": horizon}
+            csv_data = fetch_alpha_vantage_data("EARNINGS_CALENDAR", params)
+            if csv_data:
+                global full_csv_cache, full_csv_timestamp
+                full_csv_cache = csv_data
+                full_csv_timestamp = datetime.now(timezone.utc)
+            else:
+                continue
+        try:
+            lines = csv_data.strip().splitlines()
+            if len(lines) < 2:
+                continue
+            csv_reader = csv.DictReader(lines)
+            for row in csv_reader:
+                if row.get("symbol") == ticker:
+                    report_date = row.get("reportDate", "").strip()
+                    if not report_date:
+                        continue
                     report_datetime = datetime.strptime(report_date, "%m/%d/%y")
                     if report_datetime.year < 2000:
                         report_datetime = report_datetime.replace(year=report_datetime.year + 100)
                     report_datetime = report_datetime.replace(tzinfo=timezone.utc)
-                    logger.info(f"Step 10: Parsed reportDate as datetime: {report_datetime}")
-                except ValueError as e:
-                    logger.error(f"Step 11: Failed to parse reportDate {report_date!r}: {e}")
-                    continue
-
-                current_time = datetime.now(timezone.utc)
-                report_date_formatted = report_datetime.strftime("%Y-%m-%d")
-                logger.info(f"Step 12: Comparing report date {report_date_formatted} ({report_datetime}) with current date {current_time}")
-
-                if report_datetime > current_time:
-                    logger.info(f"Step 13: Found upcoming earnings date for {ticker}: {report_date_formatted}")
-                    return report_date_formatted
-                else:
-                    logger.warning(f"Step 14: Report date {report_date_formatted} is not in the future for {ticker}")
-                    continue
-            except Exception as e:
-                logger.error(f"Step 15: Error parsing per-symbol CSV for {ticker} with horizon {horizon}: {e}")
-                continue
-
-    logger.info(f"Step 16: Falling back to full earnings calendar CSV for {ticker}")
-    global full_csv_cache, full_csv_timestamp
-    current_time = datetime.now(timezone.utc)
-
-    for horizon in horizons:
-        if full_csv_cache and full_csv_timestamp and (current_time - full_csv_timestamp).total_seconds() < CACHE_DURATION:
-            logger.info(f"Step 17: Using cached full earnings calendar CSV")
-            csv_data = full_csv_cache
-        else:
-            params = {
-                "horizon": horizon
-            }
-            csv_data = fetch_alpha_vantage_data("EARNINGS_CALENDAR", params)
-            logger.info(f"Step 18: Fetched full earnings calendar CSV with horizon {horizon}: {len(csv_data) if csv_data else 0} bytes")
-            if csv_data:
-                full_csv_cache = csv_data
-                full_csv_timestamp = current_time
-            else:
-                logger.error(f"Step 19: Failed to fetch full earnings calendar CSV with horizon {horizon}")
-                continue
-
-        try:
-            lines = csv_data.strip().splitlines()
-            logger.info(f"Step 20: Split full CSV into {len(lines)} lines")
-
-            if len(lines) < 2:
-                logger.error(f"Step 21: Full CSV has no data rows (only header or empty)")
-                continue
-
-            csv_reader = csv.DictReader(lines)
-            for row in csv_reader:
-                if row.get("symbol") == ticker:
-                    logger.info(f"Step 22: Found row for {ticker}: {row}")
-                    report_date = row.get("reportDate", "").strip()
-                    logger.info(f"Step 23: Extracted reportDate: {report_date!r}")
-
-                    if not report_date:
-                        logger.error(f"Step 24: No reportDate found for {ticker}")
-                        continue
-
-                    try:
-                        report_datetime = datetime.strptime(report_date, "%m/%d/%y")
-                        if report_datetime.year < 2000:
-                            report_datetime = report_datetime.replace(year=report_datetime.year + 100)
-                        report_datetime = report_datetime.replace(tzinfo=timezone.utc)
-                        logger.info(f"Step 25: Parsed reportDate as datetime: {report_datetime}")
-                    except ValueError as e:
-                        logger.error(f"Step 26: Failed to parse reportDate {report_date!r}: {e}")
-                        continue
-
                     current_time = datetime.now(timezone.utc)
-                    report_date_formatted = report_datetime.strftime("%Y-%m-%d")
-                    logger.info(f"Step 27: Comparing report date {report_date_formatted} ({report_datetime}) with current date {current_time}")
-
                     if report_datetime > current_time:
-                        logger.info(f"Step 28: Found upcoming earnings date for {ticker}: {report_date_formatted}")
-                        return report_date_formatted
-                    else:
-                        logger.warning(f"Step 29: Report date {report_date_formatted} is not in the future for {ticker}")
-                        continue
-            logger.warning(f"Step 30: No upcoming earnings date found for {ticker} in full CSV with horizon {horizon}")
+                        return report_datetime.strftime("%Y-%m-%d")
         except Exception as e:
-            logger.error(f"Step 31: Error parsing full earnings calendar CSV for {ticker} with horizon {horizon}: {e}")
+            logger.error(f"Error parsing full earnings CSV for {ticker}: {e}")
             continue
-
-    logger.error(f"Step 32: Failed to find upcoming earnings date for {ticker} after all attempts")
     return "N/A"
 
-@app.get("/debug-earnings/{ticker}")
-async def debug_earnings(ticker: str):
-    params = {
-        "symbol": ticker,
-        "horizon": "3month"
-    }
-    per_symbol_csv = fetch_alpha_vantage_data("EARNINGS_CALENDAR", params)
-
-    params = {
-        "horizon": "3month"
-    }
-    full_csv = fetch_alpha_vantage_data("EARNINGS_CALENDAR", params)
-
-    return {
-        "per_symbol_csv": per_symbol_csv,
-        "full_csv_first_1000_chars": full_csv[:1000] if full_csv else None
-    }
-
 def fetch_fmp_short_interest(ticker):
-    logger.warning(f"Short interest data for {ticker} requires a paid FMP plan")
     return {"short_interest": "N/A", "float_shares": "N/A"}
 
 def get_historical_data(ticker):
-    params = {
-        "symbol": ticker,
-        "interval": "1min",
-        "outputsize": "compact"
-    }
+    is_foreign = /\.(ST|PA|MI|DE|OL|AX|T|TO|L)$/.test(ticker)
+    if is_foreign:
+        yahoo_data = fetch_yahoo_data(ticker, range="1mo", interval="1min")
+        if yahoo_data:
+            return {"dates": yahoo_data["dates"], "prices": yahoo_data["prices"]}
+        return {"dates": [], "prices": []}
+    params = {"symbol": ticker, "interval": "1min", "outputsize": "compact"}
     data = fetch_alpha_vantage_data("TIME_SERIES_INTRADAY", params)
     if data and "Time Series (1min)" in data:
         time_series = data["Time Series (1min)"]
@@ -279,9 +201,7 @@ def get_historical_data(ticker):
             if price != "N/A":
                 dates.append(timestamp)
                 prices.append(price)
-        logger.info(f"Intraday timestamps for {ticker}: {dates[:5]}")
         return {"dates": dates, "prices": prices}
-    logger.warning(f"No intraday data found for {ticker}")
     return {"dates": [], "prices": []}
 
 def get_earnings_date(ticker):
@@ -291,6 +211,17 @@ def get_short_interest_data(ticker):
     return fetch_fmp_short_interest(ticker)
 
 def get_company_overview(ticker):
+    is_foreign = /\.(ST|PA|MI|DE|OL|AX|T|TO|L)$/.test(ticker)
+    if is_foreign:
+        yahoo_data = fetch_yahoo_data(ticker, range="1d", interval="1d")
+        if yahoo_data:
+            return {
+                "market_cap": "N/A",  # Yahoo API doesn't provide market cap directly
+                "shares": "N/A",
+                "company_name": yahoo_data["company_name"],
+                "country": yahoo_data["country"]
+            }
+        return {"market_cap": "N/A", "shares": "N/A", "company_name": "N/A", "country": "N/A"}
     params = {"symbol": ticker}
     data = fetch_alpha_vantage_data("OVERVIEW", params)
     if data:
@@ -300,20 +231,12 @@ def get_company_overview(ticker):
             "company_name": data.get("Name", "N/A"),
             "country": data.get("Country", "N/A")
         }
-    logger.warning(f"No company overview data found for {ticker}")
     return {"market_cap": "N/A", "shares": "N/A", "company_name": "N/A", "country": "N/A"}
 
 def get_currency(ticker):
     suffix_to_currency = {
-        ".ST": "SEK",
-        ".PA": "EUR",
-        ".MI": "EUR",
-        ".DE": "EUR",
-        ".OL": "NOK",
-        ".AX": "AUD",
-        ".T": "JPY",
-        ".TO": "CAD",
-        ".L": "GBP",
+        ".ST": "SEK", ".PA": "EUR", ".MI": "EUR", ".DE": "EUR", ".OL": "NOK",
+        ".AX": "AUD", ".T": "JPY", ".TO": "CAD", ".L": "GBP"
     }
     for suffix, currency in suffix_to_currency.items():
         if ticker.endswith(suffix):
@@ -322,21 +245,14 @@ def get_currency(ticker):
 
 def fetch_forex_data(from_currency, to_currency, frequency="daily"):
     if from_currency == to_currency:
-        logger.info(f"No conversion needed for {from_currency}/{to_currency}")
         return {"dates": [], "rates": []}
     function = {"daily": "FX_DAILY", "weekly": "FX_WEEKLY", "monthly": "FX_MONTHLY"}.get(frequency, "FX_DAILY")
-    params = {
-        "from_symbol": from_currency,
-        "to_symbol": to_currency,
-        "outputsize": "full"
-    }
+    params = {"from_symbol": from_currency, "to_symbol": to_currency, "outputsize": "full"}
     data = fetch_alpha_vantage_data(function, params)
     if not data:
-        logger.error(f"Failed to fetch forex data for {from_currency}/{to_currency} ({frequency})")
         return {"dates": [], "rates": []}
     time_series_key = f"Time Series FX ({frequency.capitalize()})"
     if time_series_key not in data:
-        logger.error(f"Invalid response format for {from_currency}/{to_currency}: {data}")
         return {"dates": [], "rates": []}
     time_series = data[time_series_key]
     dates = []
@@ -346,7 +262,6 @@ def fetch_forex_data(from_currency, to_currency, frequency="daily"):
         if rate != "N/A":
             dates.append(date)
             rates.append(rate)
-    logger.info(f"Fetched {len(dates)} {frequency} forex entries for {from_currency}/{to_currency}, most recent date: {dates[0] if dates else 'N/A'}")
     return {"dates": dates, "rates": rates}
 
 def adjust_for_currency(ticker, dates, prices, frequency):
@@ -355,7 +270,6 @@ def adjust_for_currency(ticker, dates, prices, frequency):
         return dates, prices
     forex_data = fetch_forex_data(currency, "USD", frequency)
     if not forex_data or not forex_data["dates"]:
-        logger.warning(f"No forex data available for {currency}/USD, using unadjusted prices for {ticker}")
         return dates, prices
     forex_dates = forex_data["dates"]
     forex_rates = forex_data["rates"]
@@ -373,10 +287,14 @@ def adjust_for_currency(ticker, dates, prices, frequency):
     return dates, adjusted_prices
 
 def get_historical_data_daily(ticker):
-    params = {
-        "symbol": ticker,
-        "outputsize": "full"
-    }
+    is_foreign = /\.(ST|PA|MI|DE|OL|AX|T|TO|L)$/.test(ticker)
+    if is_foreign:
+        yahoo_data = fetch_yahoo_data(ticker, range="1mo", interval="1d")
+        if yahoo_data:
+            dates, prices = adjust_for_currency(ticker, yahoo_data["dates"], yahoo_data["prices"], "daily")
+            return {"dates": dates, "prices": prices}
+        return {"dates": [], "prices": []}
+    params = {"symbol": ticker, "outputsize": "full"}
     data = fetch_alpha_vantage_data("TIME_SERIES_DAILY_ADJUSTED", params)
     if data and "Time Series (Daily)" in data:
         time_series = data["Time Series (Daily)"]
@@ -387,17 +305,18 @@ def get_historical_data_daily(ticker):
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
-        logger.info(f"Fetched {len(dates)} daily historical entries for {ticker}, most recent date: {dates[0] if dates else 'N/A'}")
-        dates, prices = adjust_for_currency(ticker, dates, prices, "daily")
         return {"dates": dates, "prices": prices}
-    logger.warning(f"No daily historical data found for {ticker}")
     return {"dates": [], "prices": []}
 
 def get_historical_data_weekly(ticker):
-    params = {
-        "symbol": ticker,
-        "outputsize": "full"
-    }
+    is_foreign = /\.(ST|PA|MI|DE|OL|AX|T|TO|L)$/.test(ticker)
+    if is_foreign:
+        yahoo_data = fetch_yahoo_data(ticker, range="1y", interval="1wk")
+        if yahoo_data:
+            dates, prices = adjust_for_currency(ticker, yahoo_data["dates"], yahoo_data["prices"], "weekly")
+            return {"dates": dates, "prices": prices}
+        return {"dates": [], "prices": []}
+    params = {"symbol": ticker, "outputsize": "full"}
     data = fetch_alpha_vantage_data("TIME_SERIES_WEEKLY_ADJUSTED", params)
     if data and "Weekly Adjusted Time Series" in data:
         time_series = data["Weekly Adjusted Time Series"]
@@ -408,17 +327,18 @@ def get_historical_data_weekly(ticker):
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
-        logger.info(f"Fetched {len(dates)} weekly historical entries for {ticker}, most recent date: {dates[0] if dates else 'N/A'}")
-        dates, prices = adjust_for_currency(ticker, dates, prices, "weekly")
         return {"dates": dates, "prices": prices}
-    logger.warning(f"No weekly historical data found for {ticker}")
     return {"dates": [], "prices": []}
 
 def get_historical_data_monthly(ticker):
-    params = {
-        "symbol": ticker,
-        "outputsize": "full"
-    }
+    is_foreign = /\.(ST|PA|MI|DE|OL|AX|T|TO|L)$/.test(ticker)
+    if is_foreign:
+        yahoo_data = fetch_yahoo_data(ticker, range="5y", interval="1mo")
+        if yahoo_data:
+            dates, prices = adjust_for_currency(ticker, yahoo_data["dates"], yahoo_data["prices"], "monthly")
+            return {"dates": dates, "prices": prices}
+        return {"dates": [], "prices": []}
+    params = {"symbol": ticker, "outputsize": "full"}
     data = fetch_alpha_vantage_data("TIME_SERIES_MONTHLY_ADJUSTED", params)
     if data and "Monthly Adjusted Time Series" in data:
         time_series = data["Monthly Adjusted Time Series"]
@@ -429,10 +349,7 @@ def get_historical_data_monthly(ticker):
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
-        logger.info(f"Fetched {len(dates)} monthly historical entries for {ticker}, most recent date: {dates[0] if dates else 'N/A'}")
-        dates, prices = adjust_for_currency(ticker, dates, prices, "monthly")
-        return {"dates": dates, "prices": []}
-    logger.warning(f"No monthly historical data found for {ticker}")
+        return {"dates": dates, "prices": prices}
     return {"dates": [], "prices": []}
 
 async def scrape_ticker(ticker: str):
@@ -440,11 +357,7 @@ async def scrape_ticker(ticker: str):
     cached_data = cache.get(cache_key)
     current_time = datetime.now(timezone.utc)
     if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
-        logger.info(f"Returning cached data for {ticker}")
         return cached_data["data"]
-
-    logger.info(f"Fetching data for ticker: {ticker}")
-    await asyncio.sleep(3)  # Delay to avoid rate limiting
 
     historical_data = get_historical_data(ticker)
     historical_dates = historical_data["dates"]
@@ -524,9 +437,6 @@ async def scrape_ticker(ticker: str):
 
     if historical_dates_daily:
         cache[cache_key] = {"data": result, "timestamp": current_time}
-    else:
-        logger.warning(f"Not caching response for {ticker} due to missing historical data")
-
     return result
 
 @app.get("/scrape-weekly/{ticker}")
@@ -535,11 +445,7 @@ async def scrape_ticker_weekly(ticker: str):
     cached_data = cache.get(cache_key)
     current_time = datetime.now(timezone.utc)
     if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
-        logger.info(f"Returning cached weekly data for {ticker}")
         return cached_data["data"]
-
-    logger.info(f"Fetching weekly data for ticker: {ticker}")
-    await asyncio.sleep(3)  # Delay to avoid rate limiting
 
     historical_data_weekly = get_historical_data_weekly(ticker)
     historical_dates_weekly = historical_data_weekly["dates"]
@@ -553,9 +459,6 @@ async def scrape_ticker_weekly(ticker: str):
 
     if historical_dates_weekly:
         cache[cache_key] = {"data": result, "timestamp": current_time}
-    else:
-        logger.warning(f"Not caching weekly response for {ticker} due to missing historical data")
-
     return result
 
 @app.get("/scrape-monthly/{ticker}")
@@ -564,11 +467,7 @@ async def scrape_ticker_monthly(ticker: str):
     cached_data = cache.get(cache_key)
     current_time = datetime.now(timezone.utc)
     if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
-        logger.info(f"Returning cached monthly data for {ticker}")
         return cached_data["data"]
-
-    logger.info(f"Fetching monthly data for ticker: {ticker}")
-    await asyncio.sleep(3)  # Delay to avoid rate limiting
 
     historical_data_monthly = get_historical_data_monthly(ticker)
     historical_dates_monthly = historical_data_monthly["dates"]
@@ -582,9 +481,6 @@ async def scrape_ticker_monthly(ticker: str):
 
     if historical_dates_monthly:
         cache[cache_key] = {"data": result, "timestamp": current_time}
-    else:
-        logger.warning(f"Not caching monthly response for {ticker} due to missing historical data")
-
     return result
 
 @app.get("/forex/{from_currency}/{to_currency}/{frequency}")
@@ -593,13 +489,10 @@ async def get_forex_data(from_currency: str, to_currency: str, frequency: str):
     cached_data = cache.get(cache_key)
     current_time = datetime.now(timezone.utc)
     if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
-        logger.info(f"Returning cached forex data for {from_currency}/{to_currency} ({frequency})")
         return cached_data["data"]
 
-    logger.info(f"Fetching {frequency} forex data for {from_currency}/{to_currency}")
     forex_data = fetch_forex_data(from_currency, to_currency, frequency)
     if not forex_data["dates"]:
-        logger.warning(f"No forex data available for {from_currency}/{to_currency}")
         raise HTTPException(status_code=404, detail="No forex data available")
     result = {
         "from_currency": from_currency,
@@ -659,7 +552,14 @@ async def scrape_batch(request: TickerRequest):
                 return await scrape_ticker(ticker)
             except Exception as e:
                 logger.error(f"Error processing {ticker}: {e}")
-                return {"ticker": ticker, "error": str(e)}
+                return {
+                    "ticker": ticker,
+                    "company_name": "N/A",
+                    "country": "N/A",
+                    "historical_dates_daily": [],
+                    "historical_prices_daily": [],
+                    "error": str(e)
+                }
 
     tasks = [process_ticker(ticker) for ticker in request.tickers]
     results = await asyncio.gather(*tasks)
