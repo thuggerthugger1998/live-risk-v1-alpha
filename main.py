@@ -1,4 +1,3 @@
-```python
 import asyncio
 from fastapi import FastAPI, HTTPException
 import requests
