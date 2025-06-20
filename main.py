@@ -1,3 +1,4 @@
+```python
 import asyncio
 from fastapi import FastAPI, HTTPException
 import requests
@@ -263,6 +264,7 @@ def fetch_fmp_short_interest(ticker):
     logger.warning(f"Short interest data for {ticker} requires a paid FMP plan")
     return {"short_interest": "N/A", "float_shares": "N/A"}
 
+# Updated function to use adjusted close prices
 def get_historical_data(ticker):
     params = {
         "symbol": ticker,
@@ -275,7 +277,7 @@ def get_historical_data(ticker):
         dates = []
         prices = []
         for timestamp, values in sorted(time_series.items(), reverse=True):
-            price = parse_float(values["4. close"])
+            price = parse_float(values["5. adjusted close"])  # Updated to use adjusted close
             if price != "N/A":
                 dates.append(timestamp)
                 prices.append(price)
@@ -372,18 +374,19 @@ def adjust_for_currency(ticker, dates, prices, frequency):
         adjusted_prices.append(adjusted_price)
     return dates, adjusted_prices
 
+# Updated function to use adjusted close prices
 def get_historical_data_daily(ticker):
     params = {
         "symbol": ticker,
         "outputsize": "full"
     }
-    data = fetch_alpha_vantage_data("TIME_SERIES_DAILY", params)
+    data = fetch_alpha_vantage_data("TIME_SERIES_DAILY_ADJUSTED", params)
     if data and "Time Series (Daily)" in data:
         time_series = data["Time Series (Daily)"]
         dates = []
         prices = []
         for date, values in sorted(time_series.items(), reverse=True):
-            price = parse_float(values["4. close"])
+            price = parse_float(values["5. adjusted close"])  # Updated to use adjusted close
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
@@ -393,18 +396,19 @@ def get_historical_data_daily(ticker):
     logger.warning(f"No daily historical data found for {ticker}")
     return {"dates": [], "prices": []}
 
+# Updated function to use adjusted close prices
 def get_historical_data_weekly(ticker):
     params = {
         "symbol": ticker,
         "outputsize": "full"
     }
-    data = fetch_alpha_vantage_data("TIME_SERIES_WEEKLY", params)
-    if data and "Weekly Time Series" in data:
-        time_series = data["Weekly Time Series"]
+    data = fetch_alpha_vantage_data("TIME_SERIES_WEEKLY_ADJUSTED", params)
+    if data and "Weekly Adjusted Time Series" in data:
+        time_series = data["Weekly Adjusted Time Series"]
         dates = []
         prices = []
         for date, values in sorted(time_series.items(), reverse=True):
-            price = parse_float(values["4. close"])
+            price = parse_float(values["5. adjusted close"])  # Updated to use adjusted close
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
@@ -414,18 +418,19 @@ def get_historical_data_weekly(ticker):
     logger.warning(f"No weekly historical data found for {ticker}")
     return {"dates": [], "prices": []}
 
+# Updated function to use adjusted close prices
 def get_historical_data_monthly(ticker):
     params = {
         "symbol": ticker,
         "outputsize": "full"
     }
-    data = fetch_alpha_vantage_data("TIME_SERIES_MONTHLY", params)
-    if data and "Monthly Time Series" in data:
-        time_series = data["Monthly Time Series"]
+    data = fetch_alpha_vantage_data("TIME_SERIES_MONTHLY_ADJUSTED", params)
+    if data and "Monthly Adjusted Time Series" in data:
+        time_series = data["Monthly Adjusted Time Series"]
         dates = []
         prices = []
         for date, values in sorted(time_series.items(), reverse=True):
-            price = parse_float(values["4. close"])
+            price = parse_float(values["5. adjusted close"])  # Updated to use adjusted close
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
@@ -670,3 +675,4 @@ async def scrape_batch(request: TickerRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+```
