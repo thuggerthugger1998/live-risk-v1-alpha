@@ -72,17 +72,31 @@ def fetch_alpha_vantage_data(endpoint, params):
             if endpoint == "EARNINGS_CALENDAR":
                 return response.text
             data = response.json()
-            if "Error Message" in data or "Information" in data or "Note" in data:
-                logger.error(f"API issue for {endpoint}: {data.get('Error Message') or data.get('Information') or data.get('Note')}")
+            if "Error Message" in data:
+                logger.error(f"API error for {endpoint}: {data['Error Message']}")
+                return None
+            if "Information" in data and "Thank you for using Alpha Vantage" in data["Information"]:
+                logger.error(f"Rate limit exceeded for {endpoint}")
                 if attempt < max_attempts:
+                    logger.info(f"Retrying after 30 seconds...")
                     time.sleep(30)
                     attempt += 1
                     continue
                 return None
+            if "Note" in data:
+                logger.error(f"API note for {endpoint}: {data['Note']}")
+                if attempt < max_attempts:
+                    logger.info(f"Retrying after 30 seconds...")
+                    time.sleep(30)
+                    attempt += 1
+                    continue
+                return None
+            logger.info(f"Successfully fetched data for {endpoint}")
             return data
         except Exception as e:
-            logger.error(f"Error fetching data for {endpoint}: {e}")
+            logger.error(f"Error fetching data from Alpha Vantage for {endpoint}: {e}")
             if attempt < max_attempts:
+                logger.info(f"Retrying after 30 seconds...")
                 time.sleep(30)
                 attempt += 1
                 continue
@@ -96,6 +110,7 @@ def fetch_yahoo_data(ticker, range="1mo", interval="1d"):
         data = response.json()
         result = data.get("chart", {}).get("result", [{}])[0]
         if not result or not result.get("timestamp") or not result.get("indicators", {}).get("adjclose"):
+            logger.warning(f"No valid data in Yahoo response for {ticker}")
             return None
         timestamps = result["timestamp"]
         prices = result["indicators"]["adjclose"][0]["adjclose"]
@@ -103,9 +118,10 @@ def fetch_yahoo_data(ticker, range="1mo", interval="1d"):
         dates = [datetime.fromtimestamp(ts).strftime("%Y-%m-%d") for ts in timestamps]
         exchange_to_country = {
             'Europe/Stockholm': 'Sweden', 'Europe/London': 'United Kingdom', 'Europe/Milan': 'Italy',
-            'Europe/Paris': 'France', 'Europe/Berlin': 'Germany', 'Australia/Sydney': 'Australia',
+            'Europe/Paris': 'France', 'Europe/Frankfurt': 'Germany', 'Australia/Sydney': 'Australia',
             'Asia/Tokyo': 'Japan', 'America/Toronto': 'Canada', 'America/New_York': 'USA'
         }
+        logger.info(f"Successfully fetched Yahoo data for {ticker}")
         return {
             "dates": dates,
             "prices": [parse_float(p) for p in prices if p is not None],
@@ -184,12 +200,17 @@ def fetch_fmp_short_interest(ticker):
     return {"short_interest": "N/A", "float_shares": "N/A"}
 
 def get_historical_data(ticker):
-    is_foreign = /\.(ST|PA|MI|DE|OL|AX|T|TO|L)$/.test(ticker)
+    is_foreign = re.match(r'.*\.(ST|PA|MI|DE|OL|AX|T|TO|L)$', ticker, re.IGNORECASE)
+    logger.info(f"Processing {ticker}: {'Foreign' if is_foreign else 'US'} ticker")
     if is_foreign:
+        logger.info(f"Using Yahoo Finance for {ticker}")
         yahoo_data = fetch_yahoo_data(ticker, range="1mo", interval="1min")
         if yahoo_data:
             return {"dates": yahoo_data["dates"], "prices": yahoo_data["prices"]}
+        else:
+            logger.warning(f"Failed to fetch Yahoo data for {ticker}")
         return {"dates": [], "prices": []}
+    logger.info(f"Using Alpha Vantage for {ticker}")
     params = {"symbol": ticker, "interval": "1min", "outputsize": "compact"}
     data = fetch_alpha_vantage_data("TIME_SERIES_INTRADAY", params)
     if data and "Time Series (1min)" in data:
@@ -201,7 +222,12 @@ def get_historical_data(ticker):
             if price != "N/A":
                 dates.append(timestamp)
                 prices.append(price)
+        if dates:
+            logger.info(f"Successfully fetched Alpha Vantage intraday data for {ticker}")
+        else:
+            logger.warning(f"No valid intraday data for {ticker} from Alpha Vantage")
         return {"dates": dates, "prices": prices}
+    logger.warning(f"Failed to fetch Alpha Vantage intraday data for {ticker}")
     return {"dates": [], "prices": []}
 
 def get_earnings_date(ticker):
@@ -211,17 +237,20 @@ def get_short_interest_data(ticker):
     return fetch_fmp_short_interest(ticker)
 
 def get_company_overview(ticker):
-    is_foreign = /\.(ST|PA|MI|DE|OL|AX|T|TO|L)$/.test(ticker)
+    is_foreign = re.match(r'.*\.(ST|PA|MI|DE|OL|AX|T|TO|L)$', ticker, re.IGNORECASE)
     if is_foreign:
+        logger.info(f"Fetching company overview from Yahoo Finance for {ticker}")
         yahoo_data = fetch_yahoo_data(ticker, range="1d", interval="1d")
         if yahoo_data:
             return {
-                "market_cap": "N/A",  # Yahoo API doesn't provide market cap directly
+                "market_cap": "N/A",
                 "shares": "N/A",
                 "company_name": yahoo_data["company_name"],
                 "country": yahoo_data["country"]
             }
+        logger.warning(f"Failed to fetch company overview from Yahoo Finance for {ticker}")
         return {"market_cap": "N/A", "shares": "N/A", "company_name": "N/A", "country": "N/A"}
+    logger.info(f"Fetching company overview from Alpha Vantage for {ticker}")
     params = {"symbol": ticker}
     data = fetch_alpha_vantage_data("OVERVIEW", params)
     if data:
@@ -231,6 +260,7 @@ def get_company_overview(ticker):
             "company_name": data.get("Name", "N/A"),
             "country": data.get("Country", "N/A")
         }
+    logger.warning(f"Failed to fetch company overview from Alpha Vantage for {ticker}")
     return {"market_cap": "N/A", "shares": "N/A", "company_name": "N/A", "country": "N/A"}
 
 def get_currency(ticker):
@@ -239,7 +269,7 @@ def get_currency(ticker):
         ".AX": "AUD", ".T": "JPY", ".TO": "CAD", ".L": "GBP"
     }
     for suffix, currency in suffix_to_currency.items():
-        if ticker.endswith(suffix):
+        if ticker.upper().endswith(suffix):
             return currency
     return "USD"
 
@@ -270,6 +300,7 @@ def adjust_for_currency(ticker, dates, prices, frequency):
         return dates, prices
     forex_data = fetch_forex_data(currency, "USD", frequency)
     if not forex_data or not forex_data["dates"]:
+        logger.warning(f"No forex data for {currency}/USD, using unadjusted prices for {ticker}")
         return dates, prices
     forex_dates = forex_data["dates"]
     forex_rates = forex_data["rates"]
@@ -284,16 +315,20 @@ def adjust_for_currency(ticker, dates, prices, frequency):
             closest_rate = forex_rates[-1] if forex_rates else 1.0
         adjusted_price = prices[i] * closest_rate
         adjusted_prices.append(adjusted_price)
+        logger.info(f"Converted {ticker} price on {date} from {currency} to USD using rate {closest_rate}: {adjusted_price}")
     return dates, adjusted_prices
 
 def get_historical_data_daily(ticker):
-    is_foreign = /\.(ST|PA|MI|DE|OL|AX|T|TO|L)$/.test(ticker)
+    is_foreign = re.match(r'.*\.(ST|PA|MI|DE|OL|AX|T|TO|L)$', ticker, re.IGNORECASE)
     if is_foreign:
+        logger.info(f"Fetching daily data from Yahoo Finance for {ticker}")
         yahoo_data = fetch_yahoo_data(ticker, range="1mo", interval="1d")
         if yahoo_data:
             dates, prices = adjust_for_currency(ticker, yahoo_data["dates"], yahoo_data["prices"], "daily")
             return {"dates": dates, "prices": prices}
+        logger.warning(f"Failed to fetch daily data from Yahoo Finance for {ticker}")
         return {"dates": [], "prices": []}
+    logger.info(f"Fetching daily data from Alpha Vantage for {ticker}")
     params = {"symbol": ticker, "outputsize": "full"}
     data = fetch_alpha_vantage_data("TIME_SERIES_DAILY_ADJUSTED", params)
     if data and "Time Series (Daily)" in data:
@@ -305,17 +340,25 @@ def get_historical_data_daily(ticker):
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
+        if dates:
+            logger.info(f"Successfully fetched Alpha Vantage daily data for {ticker}")
+        else:
+            logger.warning(f"No valid daily data for {ticker} from Alpha Vantage")
         return {"dates": dates, "prices": prices}
+    logger.warning(f"Failed to fetch Alpha Vantage daily data for {ticker}")
     return {"dates": [], "prices": []}
 
 def get_historical_data_weekly(ticker):
-    is_foreign = /\.(ST|PA|MI|DE|OL|AX|T|TO|L)$/.test(ticker)
+    is_foreign = re.match(r'.*\.(ST|PA|MI|DE|OL|AX|T|TO|L)$', ticker, re.IGNORECASE)
     if is_foreign:
+        logger.info(f"Fetching weekly data from Yahoo Finance for {ticker}")
         yahoo_data = fetch_yahoo_data(ticker, range="1y", interval="1wk")
         if yahoo_data:
             dates, prices = adjust_for_currency(ticker, yahoo_data["dates"], yahoo_data["prices"], "weekly")
             return {"dates": dates, "prices": prices}
+        logger.warning(f"Failed to fetch weekly data from Yahoo Finance for {ticker}")
         return {"dates": [], "prices": []}
+    logger.info(f"Fetching weekly data from Alpha Vantage for {ticker}")
     params = {"symbol": ticker, "outputsize": "full"}
     data = fetch_alpha_vantage_data("TIME_SERIES_WEEKLY_ADJUSTED", params)
     if data and "Weekly Adjusted Time Series" in data:
@@ -327,17 +370,25 @@ def get_historical_data_weekly(ticker):
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
+        if dates:
+            logger.info(f"Successfully fetched Alpha Vantage weekly data for {ticker}")
+        else:
+            logger.warning(f"No valid weekly data for {ticker} from Alpha Vantage")
         return {"dates": dates, "prices": prices}
+    logger.warning(f"Failed to fetch Alpha Vantage weekly data for {ticker}")
     return {"dates": [], "prices": []}
 
 def get_historical_data_monthly(ticker):
-    is_foreign = /\.(ST|PA|MI|DE|OL|AX|T|TO|L)$/.test(ticker)
+    is_foreign = re.match(r'.*\.(ST|PA|MI|DE|OL|AX|T|TO|L)$', ticker, re.IGNORECASE)
     if is_foreign:
+        logger.info(f"Fetching monthly data from Yahoo Finance for {ticker}")
         yahoo_data = fetch_yahoo_data(ticker, range="5y", interval="1mo")
         if yahoo_data:
             dates, prices = adjust_for_currency(ticker, yahoo_data["dates"], yahoo_data["prices"], "monthly")
             return {"dates": dates, "prices": prices}
+        logger.warning(f"Failed to fetch monthly data from Yahoo Finance for {ticker}")
         return {"dates": [], "prices": []}
+    logger.info(f"Fetching monthly data from Alpha Vantage for {ticker}")
     params = {"symbol": ticker, "outputsize": "full"}
     data = fetch_alpha_vantage_data("TIME_SERIES_MONTHLY_ADJUSTED", params)
     if data and "Monthly Adjusted Time Series" in data:
@@ -349,7 +400,12 @@ def get_historical_data_monthly(ticker):
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
+        if dates:
+            logger.info(f"Successfully fetched Alpha Vantage monthly data for {ticker}")
+        else:
+            logger.warning(f"No valid monthly data for {ticker} from Alpha Vantage")
         return {"dates": dates, "prices": prices}
+    logger.warning(f"Failed to fetch Alpha Vantage monthly data for {ticker}")
     return {"dates": [], "prices": []}
 
 async def scrape_ticker(ticker: str):
@@ -357,8 +413,10 @@ async def scrape_ticker(ticker: str):
     cached_data = cache.get(cache_key)
     current_time = datetime.now(timezone.utc)
     if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
+        logger.info(f"Returning cached data for {ticker}")
         return cached_data["data"]
 
+    logger.info(f"Scraping data for {ticker}")
     historical_data = get_historical_data(ticker)
     historical_dates = historical_data["dates"]
     prices = historical_data["prices"]
