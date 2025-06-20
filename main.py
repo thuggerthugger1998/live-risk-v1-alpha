@@ -263,7 +263,6 @@ def fetch_fmp_short_interest(ticker):
     logger.warning(f"Short interest data for {ticker} requires a paid FMP plan")
     return {"short_interest": "N/A", "float_shares": "N/A"}
 
-# Updated function to use adjusted close prices
 def get_historical_data(ticker):
     params = {
         "symbol": ticker,
@@ -276,7 +275,7 @@ def get_historical_data(ticker):
         dates = []
         prices = []
         for timestamp, values in sorted(time_series.items(), reverse=True):
-            price = parse_float(values["5. adjusted close"])  # Updated to use adjusted close
+            price = parse_float(values["5. adjusted close"])
             if price != "N/A":
                 dates.append(timestamp)
                 prices.append(price)
@@ -306,20 +305,20 @@ def get_company_overview(ticker):
 
 def get_currency(ticker):
     suffix_to_currency = {
-        ".ST": "SEK",  # Stockholm (e.g., AAC.ST)
-        ".PA": "EUR",  # Paris (e.g., ETL.PA, SAF.PA, HO.PA, SESG.PA)
-        ".MI": "EUR",  # Milan (e.g., LDO.MI)
-        ".DE": "EUR",  # Germany (e.g., RHM.DE, OHB.DE)
-        ".OL": "NOK",  # Oslo (e.g., ARCH.OL)
-        ".AX": "AUD",  # Australia (e.g., TTT.AX)
-        ".T": "JPY",   # Tokyo (e.g., 6301.T, 9412.T)
-        ".TO": "CAD",  # Toronto (e.g., MAL.TO, MDA.TO)
-        ".L": "GBP",   # London (e.g., BA.L)
+        ".ST": "SEK",
+        ".PA": "EUR",
+        ".MI": "EUR",
+        ".DE": "EUR",
+        ".OL": "NOK",
+        ".AX": "AUD",
+        ".T": "JPY",
+        ".TO": "CAD",
+        ".L": "GBP",
     }
     for suffix, currency in suffix_to_currency.items():
         if ticker.endswith(suffix):
             return currency
-    return "USD"  # Default to USD for US stocks (e.g., TSLA, NVDA)
+    return "USD"
 
 def fetch_forex_data(from_currency, to_currency, frequency="daily"):
     if from_currency == to_currency:
@@ -373,7 +372,6 @@ def adjust_for_currency(ticker, dates, prices, frequency):
         adjusted_prices.append(adjusted_price)
     return dates, adjusted_prices
 
-# Updated function to use adjusted close prices
 def get_historical_data_daily(ticker):
     params = {
         "symbol": ticker,
@@ -385,7 +383,7 @@ def get_historical_data_daily(ticker):
         dates = []
         prices = []
         for date, values in sorted(time_series.items(), reverse=True):
-            price = parse_float(values["5. adjusted close"])  # Updated to use adjusted close
+            price = parse_float(values["5. adjusted close"])
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
@@ -395,7 +393,6 @@ def get_historical_data_daily(ticker):
     logger.warning(f"No daily historical data found for {ticker}")
     return {"dates": [], "prices": []}
 
-# Updated function to use adjusted close prices
 def get_historical_data_weekly(ticker):
     params = {
         "symbol": ticker,
@@ -407,7 +404,7 @@ def get_historical_data_weekly(ticker):
         dates = []
         prices = []
         for date, values in sorted(time_series.items(), reverse=True):
-            price = parse_float(values["5. adjusted close"])  # Updated to use adjusted close
+            price = parse_float(values["5. adjusted close"])
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
@@ -417,7 +414,6 @@ def get_historical_data_weekly(ticker):
     logger.warning(f"No weekly historical data found for {ticker}")
     return {"dates": [], "prices": []}
 
-# Updated function to use adjusted close prices
 def get_historical_data_monthly(ticker):
     params = {
         "symbol": ticker,
@@ -429,7 +425,7 @@ def get_historical_data_monthly(ticker):
         dates = []
         prices = []
         for date, values in sorted(time_series.items(), reverse=True):
-            price = parse_float(values["5. adjusted close"])  # Updated to use adjusted close
+            price = parse_float(values["5. adjusted close"])
             if price != "N/A":
                 dates.append(date)
                 prices.append(price)
@@ -543,7 +539,7 @@ async def scrape_ticker_weekly(ticker: str):
         return cached_data["data"]
 
     logger.info(f"Fetching weekly data for ticker: {ticker}")
-    await asyncio.sleep(3)  # Delay to avoid rate limiting
+    await asyncio.sleep(3)
 
     historical_data_weekly = get_historical_data_weekly(ticker)
     historical_dates_weekly = historical_data_weekly["dates"]
@@ -572,7 +568,7 @@ async def scrape_ticker_monthly(ticker: str):
         return cached_data["data"]
 
     logger.info(f"Fetching monthly data for ticker: {ticker}")
-    await asyncio.sleep(3)  # Delay to avoid rate limiting
+    await asyncio.sleep(3)
 
     historical_data_monthly = get_historical_data_monthly(ticker)
     historical_dates_monthly = historical_data_monthly["dates"]
@@ -652,11 +648,9 @@ def calculate_rsi(prices, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-# New batch endpoint model
 class TickerRequest(BaseModel):
     tickers: List[str]
 
-# New batch endpoint
 @app.post("/scrape_batch")
 async def scrape_batch(request: TickerRequest):
     async def process_ticker(ticker):
