@@ -42,7 +42,7 @@ FMP_API_KEY = os.getenv("FMP_API_KEY")
 cache = {}
 full_csv_cache = None
 full_csv_timestamp = None
-CACHE_DURATION = 60  # Cache for 60 seconds
+CACHE_DURATION = 10  # Cache for 10 seconds to support minute-by-minute updates
 
 # Set up requests session with retries
 session = requests.Session()
@@ -124,7 +124,7 @@ def fetch_alpha_vantage_earnings(ticker):
         if csv_data:
             try:
                 lines = csv_data.strip().splitlines()
-                logger.info(f"Step 2: Split per-symbol CSV into lines: {lines!r}")
+                logger.info(f"Step 2: Split parsed per-symbol CSV into lines: {lines!r}")
 
                 if len(lines) < 2:
                     logger.error(f"Step 3: Per-symbol CSV has no data rows (only header or empty): {lines}")
@@ -431,7 +431,7 @@ def get_historical_data_monthly(ticker):
                 prices.append(price)
         logger.info(f"Fetched {len(dates)} monthly historical entries for {ticker}, most recent date: {dates[0] if dates else 'N/A'}")
         dates, prices = adjust_for_currency(ticker, dates, prices, "monthly")
-        return {"dates": dates, "prices": prices}
+        return {"dates": dates, "prices": []}
     logger.warning(f"No monthly historical data found for {ticker}")
     return {"dates": [], "prices": []}
 
@@ -539,7 +539,7 @@ async def scrape_ticker_weekly(ticker: str):
         return cached_data["data"]
 
     logger.info(f"Fetching weekly data for ticker: {ticker}")
-    await asyncio.sleep(3)
+    await asyncio.sleep(3)  # Delay to avoid rate limiting
 
     historical_data_weekly = get_historical_data_weekly(ticker)
     historical_dates_weekly = historical_data_weekly["dates"]
@@ -568,7 +568,7 @@ async def scrape_ticker_monthly(ticker: str):
         return cached_data["data"]
 
     logger.info(f"Fetching monthly data for ticker: {ticker}")
-    await asyncio.sleep(3)
+    await asyncio.sleep(3)  # Delay to avoid rate limiting
 
     historical_data_monthly = get_historical_data_monthly(ticker)
     historical_dates_monthly = historical_data_monthly["dates"]
