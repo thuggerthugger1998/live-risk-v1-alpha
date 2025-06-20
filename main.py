@@ -76,9 +76,10 @@ def fetch_alpha_vantage_data(endpoint, params):
                 return response.text
             data = response.json()
             if "Error Message" in data or "Information" in data or "Note" in data:
-                logger.error(f"API error for {endpoint}: {data.get('Error Message', '') or data.get('Information', '') or data.get('Note', '')}")
-                if attempt < max_attempts:
-                    time.sleep(30)
+                error_msg = data.get('Error Message', '') or data.get('Information', '') or data.get('Note', '')
+                logger.error(f"API error for {endpoint}: {error_msg}")
+                if "Please contact premium@alphavantage.co" in error_msg:
+                    time.sleep(60)  # Wait 1 minute for rate limit
                     attempt += 1
                     continue
                 return None
@@ -147,15 +148,22 @@ def fetch_alpha_vantage_earnings(ticker):
                 if not report_date:
                     logger.warning(f"No reportDate for {ticker}, horizon {horizon}")
                     continue
-                report_datetime = datetime.strptime(report_date, "%m/%d/%y")
-                if report_datetime.year < 2000:
-                    report_datetime = report_datetime.replace(year=report_datetime.year + 100)
+                try:
+                    report_datetime = datetime.strptime(report_date, "%Y-%m-%d")
+                except ValueError:
+                    try:
+                        report_datetime = datetime.strptime(report_date, "%m/%d/%y")
+                        if report_datetime.year < 2000:
+                            report_datetime = report_datetime.replace(year=report_datetime.year + 100)
+                    except ValueError:
+                        logger.error(f"Invalid date format for {ticker}, horizon {horizon}: {report_date}")
+                        continue
                 report_datetime = report_datetime.replace(tzinfo=timezone.utc)
                 if report_datetime > current_time:
                     logger.info(f"Found upcoming earnings date for {ticker}: {report_datetime.strftime('%Y-%m-%d')}")
                     return report_datetime.strftime("%Y-%m-%d")
             except Exception as e:
-                logger.error(f"Error parsing earnings CSV for {ticker}, horizon {horizon}: {e}")
+                logger.error(f"Error parsing earnings CSV for {ticker}, horizon {horizon}: {e}. Raw CSV: {csv_data[:100]}...")
                 continue
 
     for horizon in horizons:
@@ -184,16 +192,23 @@ def fetch_alpha_vantage_earnings(ticker):
                     if not report_date:
                         logger.warning(f"No reportDate for {ticker} in full CSV, horizon {horizon}")
                         continue
-                    report_datetime = datetime.strptime(report_date, "%m/%d/%y")
-                    if report_datetime.year < 2000:
-                        report_datetime = report_datetime.replace(year=report_datetime.year + 100)
+                    try:
+                        report_datetime = datetime.strptime(report_date, "%Y-%m-%d")
+                    except ValueError:
+                        try:
+                            report_datetime = datetime.strptime(report_date, "%m/%d/%y")
+                            if report_datetime.year < 2000:
+                                report_datetime = report_datetime.replace(year=report_datetime.year + 100)
+                        except ValueError:
+                            logger.error(f"Invalid date format for {ticker}, horizon {horizon}: {report_date}")
+                            continue
                     report_datetime = report_datetime.replace(tzinfo=timezone.utc)
                     if report_datetime > current_time:
                         logger.info(f"Found upcoming earnings date for {ticker}: {report_datetime.strftime('%Y-%m-%d')}")
                         return report_datetime.strftime("%Y-%m-%d")
             logger.warning(f"No upcoming earnings date for {ticker} in full CSV, horizon {horizon}")
         except Exception as e:
-            logger.error(f"Error parsing full earnings CSV for {ticker}, horizon {horizon}: {e}")
+            logger.error(f"Error parsing full earnings CSV for {ticker}, horizon {horizon}: {e}. Raw CSV: {csv_data[:100]}...")
             continue
     logger.error(f"Failed to find upcoming earnings date for {ticker}")
     return "N/A"
@@ -452,6 +467,8 @@ async def scrape_ticker(ticker: str):
     is_foreign = re.match(r'.*\.(ST|PA|MI|DE|OL|AX|T|TO|L)$', ticker, re.IGNORECASE)
     if is_foreign:
         await asyncio.sleep(0.1)  # 100ms delay for Yahoo Finance rate limit
+    else:
+        await asyncio.sleep(1.0)  # 1-second delay for Alpha Vantage to avoid rate limit
 
     historical_data = get_historical_data(ticker)
     historical_dates = historical_data["dates"]
