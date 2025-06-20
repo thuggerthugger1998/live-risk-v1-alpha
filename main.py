@@ -2,12 +2,21 @@ import asyncio
 from fastapi import FastAPI
 import requests
 import re
+import logging
 from datetime import datetime
 from dotenv import load_dotenv
 import os
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 from pydantic import BaseModel
+
+# Configure logging
+logging.basicConfig(
+    level=logging.ERROR,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -42,23 +51,26 @@ def fetch_alpha_vantage_data(endpoint, params):
     params["apikey"] = ALPHA_VANTAGE_API_KEY
     params["function"] = endpoint
     try:
-        response = session.get(base_url, params=params, timeout=3)
+        response = session.get(base_url, params=params, timeout=5)
         response.raise_for_status()
         data = response.json()
         if "Error Message" in data or "Information" in data or "Note" in data:
+            logger.error(f"Alpha Vantage error: {data.get('Error Message', '') or data.get('Information', '') or data.get('Note', '')}")
             return None
         return data
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error fetching Alpha Vantage data: {e}")
         return None
 
 def fetch_yahoo_data(ticker):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1d&interval=1m&includeAdjustedClose=true"
     try:
-        response = session.get(url, timeout=3)
+        response = session.get(url, timeout=5)
         response.raise_for_status()
         data = response.json()
         result = data.get("chart", {}).get("result", [{}])[0]
         if not result or not result.get("timestamp") or not result.get("indicators", {}).get("adjclose"):
+            logger.error(f"No valid Yahoo data for {ticker}")
             return None
         timestamps = result["timestamp"]
         prices = result["indicators"]["adjclose"][0]["adjclose"]
@@ -69,7 +81,8 @@ def fetch_yahoo_data(ticker):
             "prices": [parse_float(p) for p in prices if p is not None],
             "currency": meta.get("currency", "USD")
         }
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error fetching Yahoo data for {ticker}: {e}")
         return None
 
 def fetch_forex_rate(from_currency, to_currency):
@@ -145,7 +158,16 @@ class TickerRequest(BaseModel):
 @app.post("/scrape_quote")
 async def scrape_quote_single(request: TickerRequest):
     async with semaphore:
-        return await scrape_quote(request.ticker)
+        try:
+            return await scrape_quote(request.ticker)
+        except Exception as e:
+            logger.error(f"Error processing {request.ticker}: {e}")
+            return {
+                "ticker": request.ticker,
+                "latest_date": "N/A",
+                "latest_price": "N/A",
+                "error": str(e)
+            }
 
 if __name__ == "__main__":
     import uvicorn
