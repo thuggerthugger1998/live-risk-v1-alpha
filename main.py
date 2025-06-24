@@ -13,7 +13,7 @@ import yfinance as yf
 
 # Configure logging
 logging.basicConfig(
-    level=logging.ERROR,
+    level=logging.INFO,  # Changed to INFO for debugging
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler()]
 )
@@ -105,20 +105,33 @@ async def scrape_earnings(ticker: str):
     cached_data = cache.get(cache_key)
     current_time = datetime.now(timezone.utc)
     if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
+        logger.info(f"Cache hit for {ticker}: {cached_data['data']}")
         return cached_data["data"]
 
     try:
         stock = yf.Ticker(ticker)
+        # Try calendar first
         earnings_dates = stock.calendar
+        earnings_date = None
         if earnings_dates is not None and 'Earnings Date' in earnings_dates:
             earnings_date = earnings_dates['Earnings Date'][0]
-            if earnings_date > datetime.now(timezone.utc):
-                result = {
-                    "ticker": ticker,
-                    "earningsDate": earnings_date.isoformat()
-                }
-                cache[cache_key] = {"data": result, "timestamp": current_time}
-                return result
+            logger.info(f"Calendar earnings for {ticker}: {earnings_date}")
+        # Fallback to get_earnings_dates
+        if not earnings_date:
+            earnings_df = stock.get_earnings_dates(limit=1)
+            if earnings_df is not None and not earnings_df.empty:
+                earnings_date = earnings_df.index[0]
+                logger.info(f"Earnings dates fallback for {ticker}: {earnings_date}")
+        
+        if earnings_date and earnings_date > datetime.now(timezone.utc):
+            result = {
+                "ticker": ticker,
+                "earningsDate": earnings_date.isoformat()
+            }
+            cache[cache_key] = {"data": result, "timestamp": current_time}
+            logger.info(f"Success for {ticker}: {result}")
+            return result
+        logger.info(f"No future earnings for {ticker}")
         return {
             "ticker": ticker,
             "earningsDate": None
