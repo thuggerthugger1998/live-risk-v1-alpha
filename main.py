@@ -3,7 +3,7 @@ from fastapi import FastAPI
 import requests
 import re
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from dotenv import load_dotenv
 import os
 from requests.adapters import HTTPAdapter
@@ -72,7 +72,6 @@ async def scrape_quote(ticker: str):
         logger.info(f"Cache hit for {ticker}: {cached_data['data']}")
         return cached_data["data"]
 
-    # Skip international tickers
     is_foreign = bool(re.match(r'.*\.|^\d', ticker))
     if is_foreign:
         return {
@@ -112,17 +111,20 @@ async def scrape_earnings(ticker: str):
 
     try:
         earnings_date = None
-
-        # Try yfinance first
         stock = yf.Ticker(ticker)
-
-        # Method 1: yfinance calendar
         earnings_dates = stock.calendar
         if earnings_dates is not None and 'Earnings Date' in earnings_dates:
-            earnings_date = earnings_dates['Earnings Date'][0]
-            logger.info(f"yfinance calendar earnings for {ticker}: {earnings_date}")
+            raw_earnings = earnings_dates['Earnings Date']
+            if isinstance(raw_earnings, list) or hasattr(raw_earnings, '__iter__'):
+                for dt in raw_earnings:
+                    if isinstance(dt, (datetime, date)) and dt > datetime.now().date():
+                        earnings_date = datetime.combine(dt, datetime.min.time(), tzinfo=timezone.utc)
+                        break
+            elif isinstance(raw_earnings, (datetime, date)) and raw_earnings > datetime.now().date():
+                earnings_date = datetime.combine(raw_earnings, datetime.min.time(), tzinfo=timezone.utc)
+            if earnings_date:
+                logger.info(f"yfinance calendar earnings for {ticker}: {earnings_date}")
 
-        # Method 2: yfinance.get_earnings_dates
         if not earnings_date:
             earnings_df = stock.get_earnings_dates(limit=12)
             if earnings_df is not None and not earnings_df.empty:
@@ -136,7 +138,6 @@ async def scrape_earnings(ticker: str):
                     earnings_date = future_dates.index[0]
                     logger.info(f"yfinance earnings dates for {ticker}: {earnings_date}")
 
-        # Method 3: yahooquery fallback
         if not earnings_date:
             stock_yq = yq.Ticker(ticker)
             calendar = stock_yq.calendar_events or stock_yq.events
@@ -158,7 +159,6 @@ async def scrape_earnings(ticker: str):
                             logger.info(f"yahooquery earnings for {ticker}: {earnings_date}")
                             break
 
-        # Ensure timezone awareness
         if earnings_date and earnings_date.tzinfo is None:
             earnings_date = earnings_date.replace(tzinfo=timezone.utc)
 
@@ -176,15 +176,6 @@ async def scrape_earnings(ticker: str):
             "ticker": ticker,
             "earningsDate": None
         }
-
-    except Exception as e:
-        logger.error(f"Error fetching earnings for {ticker}: {e}")
-        return {
-            "ticker": ticker,
-            "earningsDate": None,
-            "error": str(e)
-        }
-
 
     except Exception as e:
         logger.error(f"Error fetching earnings for {ticker}: {e}")
