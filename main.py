@@ -10,10 +10,11 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 from pydantic import BaseModel
 import yfinance as yf
+import yahooquery as yq
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,  # Changed to INFO for debugging
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler()]
 )
@@ -68,6 +69,7 @@ async def scrape_quote(ticker: str):
     cached_data = cache.get(cache_key)
     current_time = datetime.now(timezone.utc)
     if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
+        logger.info(f"Cache hit for {ticker}: {cached_data['data']}")
         return cached_data["data"]
 
     # Skip international tickers
@@ -109,20 +111,35 @@ async def scrape_earnings(ticker: str):
         return cached_data["data"]
 
     try:
+        # Try yfinance first
         stock = yf.Ticker(ticker)
-        # Try calendar first
-        earnings_dates = stock.calendar
         earnings_date = None
+        # Check calendar
+        earnings_dates = stock.calendar
         if earnings_dates is not None and 'Earnings Date' in earnings_dates:
             earnings_date = earnings_dates['Earnings Date'][0]
-            logger.info(f"Calendar earnings for {ticker}: {earnings_date}")
+            logger.info(f"yfinance calendar earnings for {ticker}: {earnings_date}")
         # Fallback to get_earnings_dates
         if not earnings_date:
-            earnings_df = stock.get_earnings_dates(limit=1)
+            earnings_df = stock.get_earnings_dates(limit=12)
             if earnings_df is not None and not earnings_df.empty:
-                earnings_date = earnings_df.index[0]
-                logger.info(f"Earnings dates fallback for {ticker}: {earnings_date}")
-        
+                future_dates = earnings_df[earnings_df.index > datetime.now(timezone.utc)]
+                if not future_dates.empty:
+                    earnings_date = future_dates.index[0]
+                    logger.info(f"yfinance earnings dates for {ticker}: {earnings_date}")
+
+        # Fallback to yahooquery
+        if not earnings_date:
+            stock_yq = yq.Ticker(ticker)
+            calendar = stock_yq.calendar_events
+            if calendar and ticker in calendar and 'earnings' in calendar[ticker]:
+                earnings_data = calendar[ticker]['earnings']
+                if isinstance(earnings_data, list) and earnings_data:
+                    future_dates = [e['startdatetime'] for e in earnings_data if 'startdatetime' in e and datetime.fromisoformat(e['startdatetime'].replace('Z', '+00:00')) > datetime.now(timezone.utc)]
+                    if future_dates:
+                        earnings_date = datetime.fromisoformat(min(future_dates).replace('Z', '+00:00'))
+                        logger.info(f"yahooquery earnings for {ticker}: {earnings_date}")
+
         if earnings_date and earnings_date > datetime.now(timezone.utc):
             result = {
                 "ticker": ticker,
