@@ -111,36 +111,50 @@ async def scrape_earnings(ticker: str):
         return cached_data["data"]
 
     try:
-        # Try yfinance first
-        stock = yf.Ticker(ticker)
         earnings_date = None
-        # Check calendar
+
+        # yfinance primary check
+        stock = yf.Ticker(ticker)
         earnings_dates = stock.calendar
         if earnings_dates is not None and 'Earnings Date' in earnings_dates:
             earnings_date = earnings_dates['Earnings Date'][0]
             logger.info(f"yfinance calendar earnings for {ticker}: {earnings_date}")
-        # Fallback to get_earnings_dates
+
+        # fallback: get_earnings_dates
         if not earnings_date:
             earnings_df = stock.get_earnings_dates(limit=12)
             if earnings_df is not None and not earnings_df.empty:
-                future_dates = earnings_df[earnings_df.index > datetime.now(timezone.utc)]
+                try:
+                    # ensure index is timezone-aware
+                    if earnings_df.index.tz is None:
+                        earnings_df.index = earnings_df.index.tz_localize("UTC")
+                except Exception as e:
+                    logger.warning(f"Could not localize index for {ticker}: {e}")
+                future_dates = earnings_df[earnings_df.index > current_time]
                 if not future_dates.empty:
                     earnings_date = future_dates.index[0]
                     logger.info(f"yfinance earnings dates for {ticker}: {earnings_date}")
 
-        # Fallback to yahooquery
+        # fallback: yahooquery
         if not earnings_date:
             stock_yq = yq.Ticker(ticker)
             calendar = stock_yq.calendar_events
             if calendar and ticker in calendar and 'earnings' in calendar[ticker]:
                 earnings_data = calendar[ticker]['earnings']
                 if isinstance(earnings_data, list) and earnings_data:
-                    future_dates = [e['startdatetime'] for e in earnings_data if 'startdatetime' in e and datetime.fromisoformat(e['startdatetime'].replace('Z', '+00:00')) > datetime.now(timezone.utc)]
+                    future_dates = [
+                        e['startdatetime'] for e in earnings_data
+                        if 'startdatetime' in e and datetime.fromisoformat(e['startdatetime'].replace('Z', '+00:00')) > current_time
+                    ]
                     if future_dates:
                         earnings_date = datetime.fromisoformat(min(future_dates).replace('Z', '+00:00'))
                         logger.info(f"yahooquery earnings for {ticker}: {earnings_date}")
 
-        if earnings_date and earnings_date > datetime.now(timezone.utc):
+        # ensure datetime is UTC for consistency
+        if earnings_date and earnings_date.tzinfo is None:
+            earnings_date = earnings_date.replace(tzinfo=timezone.utc)
+
+        if earnings_date and earnings_date > current_time:
             result = {
                 "ticker": ticker,
                 "earningsDate": earnings_date.isoformat()
@@ -148,11 +162,13 @@ async def scrape_earnings(ticker: str):
             cache[cache_key] = {"data": result, "timestamp": current_time}
             logger.info(f"Success for {ticker}: {result}")
             return result
+
         logger.info(f"No future earnings for {ticker}")
         return {
             "ticker": ticker,
             "earningsDate": None
         }
+
     except Exception as e:
         logger.error(f"Error fetching earnings for {ticker}: {e}")
         return {
