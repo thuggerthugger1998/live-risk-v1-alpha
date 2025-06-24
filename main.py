@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 import os
+import random
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 from pydantic import BaseModel
@@ -26,172 +27,154 @@ app = FastAPI()
 load_dotenv()
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 
-# Initialize cache
+# User-agents for rotation
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)...",
+    "Mozilla/5.0 (X11; Linux x86_64)...",
+]
+
+# Cache + Config
 cache = {}
-CACHE_DURATION = 10
+CACHE_DURATION = 60
+MAX_REQUESTS_PER_MIN = 75
+current_request_count = 0
+last_request_time = datetime.now(timezone.utc)
 
+# HTTP session with retry logic
 session = requests.Session()
-retries = Retry(total=3, backoff_factor=0.2, status_forcelist=[429, 500, 502, 503, 504])
+retries = Retry(total=3, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
 session.mount("https://", HTTPAdapter(max_retries=retries))
+semaphore = asyncio.Semaphore(MAX_REQUESTS_PER_MIN)
 
-semaphore = asyncio.Semaphore(75)
+# Utility: parse float
 
 def parse_float(value):
-    if not value or value == "N/A":
-        return "N/A"
     try:
-        if isinstance(value, str):
-            cleaned_value = re.sub(r'[^0-9.]', '', value)
-            return float(cleaned_value)
-        return float(value)
+        return float(re.sub(r'[^0-9.]', '', str(value)))
     except:
         return "N/A"
 
-def fetch_alpha_vantage_data(endpoint, params):
-    base_url = "https://www.alphavantage.co/query"
-    params["apikey"] = ALPHA_VANTAGE_API_KEY
-    params["function"] = endpoint
-    try:
-        response = session.get(base_url, params=params, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        if "Error Message" in data or "Information" in data or "Note" in data:
-            logger.error(f"Alpha Vantage error: {data.get('Error Message', '') or data.get('Information', '') or data.get('Note', '')}")
-            return None
-        return data
-    except Exception as e:
-        logger.error(f"Error fetching Alpha Vantage data: {e}")
-        return None
+# Utility: backoff logic
+async def backoff_sleep(attempt):
+    await asyncio.sleep(min(2 ** attempt, 10))
 
-async def scrape_quote(ticker: str):
-    cache_key = f"{ticker}_quote"
-    cached_data = cache.get(cache_key)
-    current_time = datetime.now(timezone.utc)
-    if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
-        logger.info(f"Cache hit for {ticker}: {cached_data['data']}")
-        return cached_data["data"]
+# Utility: rate limiter with quota tracker
+async def throttle_requests():
+    global current_request_count, last_request_time
+    now = datetime.now(timezone.utc)
+    if (now - last_request_time).seconds >= 60:
+        current_request_count = 0
+        last_request_time = now
+    if current_request_count >= MAX_REQUESTS_PER_MIN:
+        logger.warning("Rate limit reached, sleeping 1s")
+        await asyncio.sleep(1)
+        return await throttle_requests()
+    current_request_count += 1
+    return
 
-    is_foreign = bool(re.match(r'.*\.|^\d', ticker))
-    if is_foreign:
-        return {
-            "ticker": ticker,
-            "latest_date": "N/A",
-            "latest_price": "N/A"
-        }
-
-    await asyncio.sleep(0.05)
-    params = {"symbol": ticker}
-    data = fetch_alpha_vantage_data("GLOBAL_QUOTE", params)
-    if data and "Global Quote" in data:
-        quote = data["Global Quote"]
-        latest_price = parse_float(quote.get("05. price", "N/A"))
-        latest_date = quote.get("07. latest trading day", "N/A")
-        result = {
-            "ticker": ticker,
-            "latest_date": latest_date,
-            "latest_price": latest_price
-        }
-        if latest_price != "N/A":
-            cache[cache_key] = {"data": result, "timestamp": current_time}
-        return result
-    return {
-        "ticker": ticker,
-        "latest_date": "N/A",
-        "latest_price": "N/A"
-    }
-
+# Earnings logic
 async def scrape_earnings(ticker: str):
     cache_key = f"{ticker}_earnings"
-    cached_data = cache.get(cache_key)
     current_time = datetime.now(timezone.utc)
-    if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
-        logger.info(f"Cache hit for {ticker}: {cached_data['data']}")
-        return cached_data["data"]
+    if cache_key in cache and (current_time - cache[cache_key]["timestamp"]).total_seconds() < CACHE_DURATION:
+        return cache[cache_key]["data"]
+
+    earnings_date = None
+    attempt = 0
+    
+    while attempt < 3:
+        try:
+            await throttle_requests()
+            headers = {'User-Agent': random.choice(USER_AGENTS)}
+
+            # Method 1: yfinance calendar
+            stock = yf.Ticker(ticker)
+            cal = stock.calendar
+            if cal is not None and 'Earnings Date' in cal.index:
+                earnings_date = cal.loc['Earnings Date'].tolist()[0]
+
+            # Method 2: yfinance.get_earnings_dates()
+            if not earnings_date:
+                df = stock.get_earnings_dates(limit=12).reset_index()
+                df = df[df['Earnings Date'] > datetime.now(timezone.utc)]
+                if not df.empty:
+                    earnings_date = df['Earnings Date'].iloc[0]
+
+            # Method 3: yahooquery fallback
+            if not earnings_date:
+                stock_yq = yq.Ticker(ticker)
+                calendar = stock_yq.calendar_events or stock_yq.events
+                if calendar:
+                    for sym_data in calendar.values():
+                        earnings_data = sym_data.get("earnings")
+                        if isinstance(earnings_data, list):
+                            future_dates = [
+                                e['startdatetime']
+                                for e in earnings_data
+                                if 'startdatetime' in e and datetime.fromisoformat(e['startdatetime'].replace('Z', '+00:00')) > current_time
+                            ]
+                            if future_dates:
+                                earnings_date = datetime.fromisoformat(min(future_dates).replace('Z', '+00:00'))
+                                break
+
+            if earnings_date and earnings_date.tzinfo is None:
+                earnings_date = earnings_date.replace(tzinfo=timezone.utc)
+
+            if earnings_date and earnings_date > current_time:
+                result = {"ticker": ticker, "earningsDate": earnings_date.isoformat()}
+                cache[cache_key] = {"data": result, "timestamp": current_time}
+                return result
+
+            break
+
+        except Exception as e:
+            logger.error(f"Attempt {attempt+1}: error fetching for {ticker}: {e}")
+            await backoff_sleep(attempt)
+            attempt += 1
+
+    return {"ticker": ticker, "earningsDate": None}
+
+# Quote logic
+async def scrape_quote(ticker: str):
+    cache_key = f"{ticker}_quote"
+    current_time = datetime.now(timezone.utc)
+    if cache_key in cache and (current_time - cache[cache_key]["timestamp"]).total_seconds() < CACHE_DURATION:
+        return cache[cache_key]["data"]
+
+    await throttle_requests()
 
     try:
-        earnings_date = None
+        if bool(re.match(r'.*\.\w+$', ticker)):
+            return {"ticker": ticker, "latest_date": "N/A", "latest_price": "N/A"}
 
-        # yfinance calendar
-        stock = yf.Ticker(ticker)
-        cal = stock.calendar
-        if cal is not None and 'Earnings Date' in cal.index:
-            earnings_date = cal.loc['Earnings Date'].tolist()[0]
-            logger.info(f"[yfinance calendar] {ticker}: {earnings_date}")
-
-        # yfinance get_earnings_dates
-        if not earnings_date:
-            df = stock.get_earnings_dates(limit=12).reset_index()
-            logger.info(f"[yfinance get_earnings_dates] full DF: {df}")
-            df = df[df['Earnings Date'] > datetime.now(timezone.utc)]
-            if not df.empty:
-                earnings_date = df['Earnings Date'].iloc[0]
-                logger.info(f"[yfinance get_earnings_dates] {ticker}: {earnings_date}")
-
-        # yahooquery fallback
-        if not earnings_date:
-            stock_yq = yq.Ticker(ticker)
-            calendar = stock_yq.calendar_events or stock_yq.events
-            if calendar:
-                for sym_data in calendar.values():
-                    earnings_data = sym_data.get("earnings")
-                    if isinstance(earnings_data, list):
-                        future_dates = [
-                            e['startdatetime']
-                            for e in earnings_data
-                            if 'startdatetime' in e and datetime.fromisoformat(e['startdatetime'].replace('Z', '+00:00')) > datetime.now(timezone.utc)
-                        ]
-                        if future_dates:
-                            earnings_date = datetime.fromisoformat(min(future_dates).replace('Z', '+00:00'))
-                            logger.info(f"[yahooquery] {ticker}: {earnings_date}")
-                            break
-
-        if earnings_date and earnings_date.tzinfo is None:
-            earnings_date = earnings_date.replace(tzinfo=timezone.utc)
-
-        if earnings_date and earnings_date > datetime.now(timezone.utc):
-            result = {
-                "ticker": ticker,
-                "earningsDate": earnings_date.isoformat()
-            }
-            cache[cache_key] = {"data": result, "timestamp": current_time}
-            return result
-
-        logger.info(f"No future earnings found for {ticker}")
-        return {"ticker": ticker, "earningsDate": None}
-
+        params = {"symbol": ticker, "function": "GLOBAL_QUOTE", "apikey": ALPHA_VANTAGE_API_KEY}
+        response = session.get("https://www.alphavantage.co/query", params=params)
+        data = response.json().get("Global Quote", {})
+        result = {
+            "ticker": ticker,
+            "latest_date": data.get("07. latest trading day", "N/A"),
+            "latest_price": parse_float(data.get("05. price", "N/A"))
+        }
+        cache[cache_key] = {"data": result, "timestamp": current_time}
+        return result
     except Exception as e:
-        logger.error(f"Error fetching earnings for {ticker}: {e}")
-        return {"ticker": ticker, "earningsDate": None, "error": str(e)}
+        logger.error(f"Error fetching quote for {ticker}: {e}")
+        return {"ticker": ticker, "latest_date": "N/A", "latest_price": "N/A"}
 
+# Input schema
 class TickerRequest(BaseModel):
     ticker: str
 
 @app.post("/scrape_quote")
 async def scrape_quote_single(request: TickerRequest):
     async with semaphore:
-        try:
-            return await scrape_quote(request.ticker)
-        except Exception as e:
-            logger.error(f"Error processing {request.ticker}: {e}")
-            return {
-                "ticker": request.ticker,
-                "latest_date": "N/A",
-                "latest_price": "N/A",
-                "error": str(e)
-            }
+        return await scrape_quote(request.ticker)
 
 @app.post("/scrape_earnings")
 async def scrape_earnings_single(request: TickerRequest):
     async with semaphore:
-        try:
-            return await scrape_earnings(request.ticker)
-        except Exception as e:
-            logger.error(f"Error processing earnings for {request.ticker}: {e}")
-            return {
-                "ticker": request.ticker,
-                "earningsDate": None,
-                "error": str(e)
-            }
+        return await scrape_earnings(request.ticker)
 
 if __name__ == "__main__":
     import uvicorn
