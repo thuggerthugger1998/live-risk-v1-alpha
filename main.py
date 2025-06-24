@@ -9,6 +9,7 @@ import os
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 from pydantic import BaseModel
+import yfinance as yf
 
 # Configure logging
 logging.basicConfig(
@@ -99,6 +100,37 @@ async def scrape_quote(ticker: str):
         "latest_price": "N/A"
     }
 
+async def scrape_earnings(ticker: str):
+    cache_key = f"{ticker}_earnings"
+    cached_data = cache.get(cache_key)
+    current_time = datetime.now(timezone.utc)
+    if cached_data and (current_time - cached_data["timestamp"]).total_seconds() < CACHE_DURATION:
+        return cached_data["data"]
+
+    try:
+        stock = yf.Ticker(ticker)
+        earnings_dates = stock.calendar
+        if earnings_dates is not None and 'Earnings Date' in earnings_dates:
+            earnings_date = earnings_dates['Earnings Date'][0]
+            if earnings_date > datetime.now(timezone.utc):
+                result = {
+                    "ticker": ticker,
+                    "earningsDate": earnings_date.isoformat()
+                }
+                cache[cache_key] = {"data": result, "timestamp": current_time}
+                return result
+        return {
+            "ticker": ticker,
+            "earningsDate": None
+        }
+    except Exception as e:
+        logger.error(f"Error fetching earnings for {ticker}: {e}")
+        return {
+            "ticker": ticker,
+            "earningsDate": None,
+            "error": str(e)
+        }
+
 class TickerRequest(BaseModel):
     ticker: str
 
@@ -113,6 +145,19 @@ async def scrape_quote_single(request: TickerRequest):
                 "ticker": request.ticker,
                 "latest_date": "N/A",
                 "latest_price": "N/A",
+                "error": str(e)
+            }
+
+@app.post("/scrape_earnings")
+async def scrape_earnings_single(request: TickerRequest):
+    async with semaphore:
+        try:
+            return await scrape_earnings(request.ticker)
+        except Exception as e:
+            logger.error(f"Error processing earnings for {request.ticker}: {e}")
+            return {
+                "ticker": request.ticker,
+                "earningsDate": None,
                 "error": str(e)
             }
 
